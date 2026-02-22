@@ -1,0 +1,12 @@
+@import "tailwindcss";
+
+@theme {
+  --color-zinc-950: #09090b;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  overscroll-behavior: none;
+  /* 防止过度滚动导致回弹 */
+}
