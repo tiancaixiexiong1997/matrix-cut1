@@ -981,7 +981,9 @@ const MaterialPoolPanel = () => {
 const SortableSegment = ({
   seg,
   isEditing,
+  isSelected,
   setEditingSegId,
+  onSelect,
   colorClasses,
   boundPool,
   pools,
@@ -1016,12 +1018,27 @@ const SortableSegment = ({
     >
       <div
         onClick={(e) => {
-          e.stopPropagation(); // 阻止拖拽和点击冲突
-          setEditingSegId(seg.id);
+          e.stopPropagation();
+          if (e.shiftKey) {
+            // Shift+点击：切换如屏选状态
+            onSelect(seg.id);
+          } else {
+            // 普通点击：单独编辑
+            setEditingSegId(isEditing ? null : seg.id);
+          }
         }}
         style={{ width: `${Math.max(60, Math.floor(seg.duration * 32))}px` }}
-        className={`h-16 ${isEditing ? 'border-orange-500 ring-2 ring-orange-500/30' : colorClasses} border flex flex-col justify-center px-2 hover:brightness-125 transition-all text-xs overflow-hidden cursor-pointer rounded ${isDragging ? 'shadow-2xl shadow-orange-500/20 border-orange-500/50' : ''}`}
+        className={`h-16 border flex flex-col justify-center px-2 hover:brightness-125 transition-all text-xs overflow-hidden cursor-pointer rounded relative
+          ${isSelected ? 'border-blue-400 ring-2 ring-blue-400/40 bg-blue-500/20' : isEditing ? 'border-orange-500 ring-2 ring-orange-500/30 ' + colorClasses : colorClasses}
+          ${isDragging ? 'shadow-2xl shadow-orange-500/20 border-orange-500/50' : ''}`}
       >
+        {isSelected && (
+          <div className="absolute top-1 right-1 w-3.5 h-3.5 bg-blue-400 rounded-full flex items-center justify-center">
+            <svg viewBox="0 0 10 10" className="w-2 h-2 fill-white">
+              <polyline points="1.5,5 4,7.5 8.5,2.5" stroke="white" strokeWidth="1.8" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </div>
+        )}
         <div className="font-medium text-white/90 truncate w-full text-center">{boundPool?.name || '未知项'}</div>
         <div className="text-white/50 text-[10px] select-none text-center">{seg.duration.toFixed(1)}s</div>
       </div>
@@ -1142,10 +1159,31 @@ const WorkspaceArea = () => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [previewIndices, setPreviewIndices] = useState<Record<string, number>>({});
-  const { timeline, pools, settings, bgm, addTimelineSegment, updateTimelineSegment, removeTimelineSegment, reorderTimelineSegments, updateSettings } = useStore();
+  const [selectedSegIds, setSelectedSegIds] = useState<Set<string>>(new Set());
+  const { timeline, pools, settings, bgm, addTimelineSegment, updateTimelineSegment, removeTimelineSegment, duplicateTimelineSegment, reorderTimelineSegments, updateSettings } = useStore();
   const videoRef = React.useRef<HTMLVideoElement>(null);
   const bgmAudioRef = React.useRef<HTMLAudioElement | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
+
+  // 切换单个片段的选择状态
+  const handleToggleSelect = (segId: string) => {
+    setSelectedSegIds(prev => {
+      const next = new Set(prev);
+      next.has(segId) ? next.delete(segId) : next.add(segId);
+      return next;
+    });
+  };
+
+  // 批量更新所有选中片段的属性
+  const handleBulkUpdate = (updates: { duration?: number; poolId?: string }) => {
+    selectedSegIds.forEach(id => updateTimelineSegment(id, updates));
+  };
+
+  // 批量删除所有选中片段
+  const handleBulkDelete = () => {
+    selectedSegIds.forEach(id => removeTimelineSegment(id));
+    setSelectedSegIds(new Set());
+  };
 
   const handleExportScheme = () => {
     const data = {
@@ -1447,8 +1485,51 @@ const WorkspaceArea = () => {
           </div>
         </div>
 
-        <div className="flex-1 p-4 overflow-x-auto custom-scrollbar">
-          <div className="flex gap-2 min-w-max items-center h-full pt-4 relative">
+        <div className="flex-1 p-4 overflow-x-auto custom-scrollbar" onClick={() => setSelectedSegIds(new Set())}>
+
+          {/* 批量操作浮动工具栏 */}
+          {selectedSegIds.size >= 1 && (
+            <div
+              className="mb-3 flex items-center gap-3 px-3 py-2 bg-blue-500/15 border border-blue-400/30 rounded-lg"
+              onClick={e => e.stopPropagation()}
+            >
+              <span className="text-blue-300 text-xs font-medium shrink-0">已选 {selectedSegIds.size} 段</span>
+              <div className="flex items-center gap-1.5">
+                <span className="text-white/40 text-xs">统一时长</span>
+                <input
+                  type="number" step="0.1" min="0.1" defaultValue="3"
+                  className="w-16 bg-black/40 text-white/90 text-xs px-2 py-1 rounded border border-white/10 outline-none text-center"
+                  id="bulkDuration"
+                />
+                <span className="text-white/40 text-xs">s</span>
+                <button
+                  onClick={() => handleBulkUpdate({ duration: parseFloat((document.getElementById('bulkDuration') as HTMLInputElement)?.value) || 3 })}
+                  className="text-[10px] px-2 py-1 bg-blue-500/20 text-blue-300 border border-blue-400/30 rounded hover:bg-blue-500/30 transition"
+                >应用</button>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-white/40 text-xs">统一素材池</span>
+                <select
+                  className="bg-black/50 text-white/80 text-xs px-2 py-1 rounded border border-white/10 outline-none"
+                  onChange={e => e.target.value && handleBulkUpdate({ poolId: e.target.value })}
+                  defaultValue=""
+                >
+                  <option value="">选择素材池…</option>
+                  {pools.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                </select>
+              </div>
+              <button
+                onClick={handleBulkDelete}
+                className="ml-auto flex items-center gap-1 text-xs text-red-400 hover:text-red-300 border border-red-500/30 px-2 py-1 rounded hover:bg-red-500/10 transition"
+              ><Trash2 className="w-3 h-3" />删除所选</button>
+              <button
+                onClick={() => setSelectedSegIds(new Set())}
+                className="text-white/40 hover:text-white text-xs px-2"
+              >取消选中</button>
+            </div>
+          )}
+
+          <div className="flex gap-2 min-w-max items-center h-full relative">
             <DndContext
               sensors={sensors}
               collisionDetection={closestCenter}
@@ -1471,13 +1552,15 @@ const WorkspaceArea = () => {
                       seg={seg}
                       idx={idx}
                       isEditing={isEditing}
+                      isSelected={selectedSegIds.has(seg.id)}
                       setEditingSegId={setEditingSegId}
+                      onSelect={handleToggleSelect}
                       colorClasses={colorClasses}
                       boundPool={boundPool}
                       pools={pools}
                       updateTimelineSegment={updateTimelineSegment}
                       removeTimelineSegment={removeTimelineSegment}
-                      duplicateTimelineSegment={useStore.getState().duplicateTimelineSegment}
+                      duplicateTimelineSegment={duplicateTimelineSegment}
                       addTimelineSegment={addTimelineSegment}
                       isLast={idx === timeline.length - 1}
                     />
