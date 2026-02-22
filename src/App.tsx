@@ -373,7 +373,12 @@ const GlassPanel: React.FC<{ children: React.ReactNode; className?: string }> = 
 // Main Compiler & Exporter
 // ==========================================
 
+// 全局导出取消信号（由 Header 中的停止按鈕调用）
+let exportCancelSignal = false;
+export const cancelExport = () => { exportCancelSignal = true; };
+
 export const performExport = async (store: MatrixStore, quantity: number = 1) => {
+  exportCancelSignal = false; // 每次开始导出重置状态
   const { pools, timeline, bgm, addExportTask, updateExportTask } = store;
 
   if (timeline.length === 0) {
@@ -385,6 +390,8 @@ export const performExport = async (store: MatrixStore, quantity: number = 1) =>
 
   // 顺序执行队列以防 FFmpeg 内存崩溃
   for (let q = 0; q < quantity; q++) {
+    // 如果用户点击了停止按鈕，跳出循环
+    if (exportCancelSignal) break;
     // 1. 初始化任务
     const taskId = uuidv4();
     // 格式化当前时间为 "20260222_230809" 形式
@@ -688,6 +695,14 @@ const Header = () => {
             className="bg-orange-500 hover:bg-orange-600 text-white px-6 py-2 rounded-lg font-medium shadow-lg shadow-orange-500/20 active:scale-95 transition-all text-sm flex items-center gap-2"
           >
             <Zap className="w-4 h-4 fill-current" /> 一键批量生成
+          </button>
+
+          <button
+            onClick={cancelExport}
+            className="bg-red-500/20 hover:bg-red-500/40 text-red-400 border border-red-500/30 px-4 py-2 rounded-lg font-medium active:scale-95 transition-all text-sm flex items-center gap-2"
+            title="停止当前批量生成"
+          >
+            <X className="w-4 h-4" /> 停止
           </button>
         </div>
       </div>
@@ -1127,8 +1142,9 @@ const WorkspaceArea = () => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [previewIndices, setPreviewIndices] = useState<Record<string, number>>({});
-  const { timeline, pools, settings, addTimelineSegment, updateTimelineSegment, removeTimelineSegment, reorderTimelineSegments, updateSettings } = useStore();
+  const { timeline, pools, settings, bgm, addTimelineSegment, updateTimelineSegment, removeTimelineSegment, reorderTimelineSegments, updateSettings } = useStore();
   const videoRef = React.useRef<HTMLVideoElement>(null);
+  const bgmAudioRef = React.useRef<HTMLAudioElement | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
   const handleExportScheme = () => {
@@ -1177,6 +1193,32 @@ const WorkspaceArea = () => {
   const [editingSegId, setEditingSegId] = useState<string | null>(null);
 
   const totalDuration = timeline.reduce((acc, seg) => acc + seg.duration, 0);
+
+  // BGM 预览音频同步控制
+  React.useEffect(() => {
+    if (isPlaying) {
+      // 开始播放时，随机选一首 BGM
+      if (bgm.files.length > 0) {
+        const picked = bgm.files[Math.floor(Math.random() * bgm.files.length)];
+        if (!bgmAudioRef.current) {
+          bgmAudioRef.current = new Audio(picked.url);
+        } else {
+          bgmAudioRef.current.src = picked.url;
+        }
+        bgmAudioRef.current.volume = bgm.bgmVolume;
+        bgmAudioRef.current.loop = true;
+        bgmAudioRef.current.play().catch(() => { });
+      }
+    } else {
+      // 暂停时停止 BGM
+      bgmAudioRef.current?.pause();
+    }
+  }, [isPlaying]);
+
+  // BGM 音量实时更新
+  React.useEffect(() => {
+    if (bgmAudioRef.current) bgmAudioRef.current.volume = bgm.bgmVolume;
+  }, [bgm.bgmVolume]);
 
   // 播放控制效果
   React.useEffect(() => {
