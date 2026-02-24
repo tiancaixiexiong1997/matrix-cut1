@@ -379,7 +379,7 @@ export const cancelExport = () => { exportCancelSignal = true; };
 
 export const performExport = async (store: MatrixStore, quantity: number = 1) => {
   exportCancelSignal = false; // 每次开始导出重置状态
-  const { pools, timeline, bgm, addExportTask, updateExportTask } = store;
+  const { pools, timeline, bgm, settings, addExportTask, updateExportTask } = store;
 
   if (timeline.length === 0) {
     alert("时间轴为空，无法导出！");
@@ -459,6 +459,9 @@ export const performExport = async (store: MatrixStore, quantity: number = 1) =>
         await ff.writeFile(input.filename, await fetchFile(input.file));
       }
 
+      // 预写入字体文件，支持烧录中文文字
+      await ff.writeFile('notosans.ttf', await fetchFile('/fonts/NotoSansSC-Black.ttf'));
+
       // 4. 构建 filter_complex 指令
       // 我们需要把每段切片，缩放/裁剪并重新校准时间戳
       let filterComplex = '';
@@ -484,7 +487,41 @@ export const performExport = async (store: MatrixStore, quantity: number = 1) =>
       });
 
       // 拼接最终连片: concat 所有视频+音频
-      filterComplex += `${outSpecs.join('')}concat=n=${inputs.length}:v=1:a=1[outv][outa_raw]; `;
+      const vStream = '[outv_raw]';
+      filterComplex += `${outSpecs.join('')}concat=n=${inputs.length}:v=1:a=1${vStream}[outa_raw]; `;
+
+      // 处理字幕与标题烧录 (Video Text Overlay)
+      const drawTextFilters: string[] = [];
+      const scaleMultiplier = 1920 / 600; // 预览界面基准高度约 600px，输出为 1920px，缩放比例为 3.2
+
+      const addDrawText = (text: string, style: TextStyle, pos: { x: number, y: number }) => {
+        if (!text || text.trim() === '') return;
+        const fontcolor = style.color.replace('#', '0x') + 'FF';
+        const shadowAlpha = Math.round(style.shadowOpacity * 255).toString(16).padStart(2, '0').toUpperCase();
+        const shadowcolor = style.shadowColor.replace('#', '0x') + shadowAlpha;
+        const shadowx = Math.round(style.shadowDistance * Math.cos(style.shadowAngle * Math.PI / 180) * scaleMultiplier);
+        const shadowy = Math.round(style.shadowDistance * -Math.sin(style.shadowAngle * Math.PI / 180) * scaleMultiplier);
+
+        const fontSize = Math.round(style.fontSize * scaleMultiplier);
+        const offsetX = Math.round(pos.x * scaleMultiplier);
+        const offsetY = Math.round(pos.y * scaleMultiplier);
+
+        // 使用单引号闭合 text，并把用户可能输入的单引号替换为全角单引号防止截断
+        const safeText = text.replace(/'/g, '’');
+        const absX = `(w-tw)/2+${offsetX}`;
+        const absY = `(h-th)/2+${offsetY}`;
+
+        drawTextFilters.push(`drawtext=fontfile=notosans.ttf:text='${safeText}':fontcolor=${fontcolor}:fontsize=${fontSize}:x=${absX}:y=${absY}:shadowcolor=${shadowcolor}:shadowx=${shadowx}:shadowy=${shadowy}`);
+      };
+
+      addDrawText(settings.mainTitle, settings.mainTitleStyle, settings.mainTitlePos);
+      addDrawText(settings.subTitle, settings.subTitleStyle, settings.subTitlePos);
+
+      if (drawTextFilters.length > 0) {
+        filterComplex += `${vStream}${drawTextFilters.join(',')}[outv]; `;
+      } else {
+        filterComplex += `${vStream}copy[outv]; `;
+      }
 
       if (hasBgm) {
         // BGM 裁剪到总时长 + 调节音量
