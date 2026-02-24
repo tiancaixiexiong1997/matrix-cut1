@@ -494,7 +494,9 @@ export const performExport = async (store: MatrixStore, quantity: number = 1) =>
       const drawTextFilters: string[] = [];
       const scaleMultiplier = 1920 / 600; // 预览界面基准高度约 600px，输出为 1920px，缩放比例为 3.2
 
-      const addDrawText = (text: string, style: TextStyle, pos: { x: number, y: number }) => {
+      let titleIdx = 0;
+      const titleFiles: string[] = [];
+      const addDrawText = async (text: string, style: TextStyle, pos: { x: number, y: number }) => {
         if (!text || text.trim() === '') return;
         const fontcolor = style.color.replace('#', '0x') + 'FF';
         const shadowAlpha = Math.round(style.shadowOpacity * 255).toString(16).padStart(2, '0').toUpperCase();
@@ -506,16 +508,19 @@ export const performExport = async (store: MatrixStore, quantity: number = 1) =>
         const offsetX = Math.round(pos.x * scaleMultiplier);
         const offsetY = Math.round(pos.y * scaleMultiplier);
 
-        // 使用单引号闭合 text，并把用户可能输入的单引号替换为全角单引号防止截断
-        const safeText = text.replace(/'/g, '’');
+        const txtFilename = `title_${titleIdx++}.txt`;
+        // 使用 TextEncoder 将字符串转为 UTF-8 字节数组写入虚拟系统
+        await ff.writeFile(txtFilename, new TextEncoder().encode(text));
+        titleFiles.push(txtFilename);
+
         const absX = `(w-tw)/2+${offsetX}`;
         const absY = `(h-th)/2+${offsetY}`;
 
-        drawTextFilters.push(`drawtext=fontfile=notosans.ttf:text='${safeText}':fontcolor=${fontcolor}:fontsize=${fontSize}:x=${absX}:y=${absY}:shadowcolor=${shadowcolor}:shadowx=${shadowx}:shadowy=${shadowy}`);
+        drawTextFilters.push(`drawtext=fontfile=notosans.ttf:textfile=${txtFilename}:fontcolor=${fontcolor}:fontsize=${fontSize}:x=${absX}:y=${absY}:shadowcolor=${shadowcolor}:shadowx=${shadowx}:shadowy=${shadowy}`);
       };
 
-      addDrawText(settings.mainTitle, settings.mainTitleStyle, settings.mainTitlePos);
-      addDrawText(settings.subTitle, settings.subTitleStyle, settings.subTitlePos);
+      await addDrawText(settings.mainTitle, settings.mainTitleStyle, settings.mainTitlePos);
+      await addDrawText(settings.subTitle, settings.subTitleStyle, settings.subTitlePos);
 
       if (drawTextFilters.length > 0) {
         filterComplex += `${vStream}${drawTextFilters.join(',')}[outv]; `;
@@ -571,6 +576,10 @@ export const performExport = async (store: MatrixStore, quantity: number = 1) =>
       }
       if (hasBgm && bgmFilename) {
         await ff.deleteFile(bgmFilename);
+      }
+      try { await ff.deleteFile('notosans.ttf'); } catch (e) { }
+      for (const tfile of titleFiles) {
+        try { await ff.deleteFile(tfile); } catch (e) { }
       }
 
       // 更新 UI 任务状态
