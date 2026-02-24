@@ -459,8 +459,6 @@ export const performExport = async (store: MatrixStore, quantity: number = 1) =>
         await ff.writeFile(input.filename, await fetchFile(input.file));
       }
 
-      // 预写入字体文件，支持烧录中文文字
-      await ff.writeFile('notosans.ttf', await fetchFile('/fonts/NotoSansSC-Black.ttf'));
 
       // 4. 构建 filter_complex 指令
       // 我们需要把每段切片，缩放/裁剪并重新校准时间戳
@@ -487,45 +485,60 @@ export const performExport = async (store: MatrixStore, quantity: number = 1) =>
       });
 
       // 拼接最终连片: concat 所有视频+音频
-      const vStream = '[outv_raw]';
-      filterComplex += `${outSpecs.join('')}concat=n=${inputs.length}:v=1:a=1${vStream}[outa_raw]; `;
+      filterComplex += `${outSpecs.join('')}concat=n=${inputs.length}:v=1:a=1[outv_concat][outa_raw]; `;
 
-      // 处理字幕与标题烧录 (Video Text Overlay)
-      const drawTextFilters: string[] = [];
-      const scaleMultiplier = 1920 / 600; // 预览界面基准高度约 600px，输出为 1920px，缩放比例为 3.2
+      // ── Canvas 文字叠加（取代 drawtext，100% 兼容中文和特殊字符）──
+      const OW = 1080, OH = 1920;
+      const scaleM = OH / 600;
+      let titleOverlayFilename = '';
+      const hasAnyTitle =
+        (settings.mainTitle && settings.mainTitle.trim() !== '') ||
+        (settings.subTitle && settings.subTitle.trim() !== '');
 
-      let titleIdx = 0;
-      const titleFiles: string[] = [];
-      const addDrawText = async (text: string, style: TextStyle, pos: { x: number, y: number }) => {
-        if (!text || text.trim() === '') return;
-        const fontcolor = style.color.replace('#', '0x') + 'FF';
-        const shadowAlpha = Math.round(style.shadowOpacity * 255).toString(16).padStart(2, '0').toUpperCase();
-        const shadowcolor = style.shadowColor.replace('#', '0x') + shadowAlpha;
-        const shadowx = Math.round(style.shadowDistance * Math.cos(style.shadowAngle * Math.PI / 180) * scaleMultiplier);
-        const shadowy = Math.round(style.shadowDistance * -Math.sin(style.shadowAngle * Math.PI / 180) * scaleMultiplier);
+      if (hasAnyTitle) {
+        const cvs = document.createElement('canvas');
+        cvs.width = OW; cvs.height = OH;
+        const ctx = cvs.getContext('2d')!;
+        ctx.clearRect(0, 0, OW, OH);
 
-        const fontSize = Math.round(style.fontSize * scaleMultiplier);
-        const offsetX = Math.round(pos.x * scaleMultiplier);
-        const offsetY = Math.round(pos.y * scaleMultiplier);
+        const drawCanvasText = (text: string, style: TextStyle, pos: { x: number; y: number }) => {
+          if (!text || !text.trim()) return;
+          ctx.save();
+          const sr = parseInt(style.shadowColor.slice(1, 3), 16);
+          const sg = parseInt(style.shadowColor.slice(3, 5), 16);
+          const sb = parseInt(style.shadowColor.slice(5, 7), 16);
+          ctx.shadowColor = `rgba(${sr},${sg},${sb},${style.shadowOpacity})`;
+          ctx.shadowBlur = style.shadowBlur * scaleM;
+          ctx.shadowOffsetX = style.shadowDistance * Math.cos(style.shadowAngle * Math.PI / 180) * scaleM;
+          ctx.shadowOffsetY = style.shadowDistance * -Math.sin(style.shadowAngle * Math.PI / 180) * scaleM;
+          ctx.font = `bold ${Math.round(style.fontSize * scaleM)}px serif`;
+          ctx.fillStyle = style.color;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(text, OW / 2 + pos.x * scaleM, OH / 2 + pos.y * scaleM);
+          ctx.restore();
+        };
 
-        const txtFilename = `title_${titleIdx++}.txt`;
-        // 使用 TextEncoder 将字符串转为 UTF-8 字节数组写入虚拟系统
-        await ff.writeFile(txtFilename, new TextEncoder().encode(text));
-        titleFiles.push(txtFilename);
+        drawCanvasText(settings.mainTitle, settings.mainTitleStyle, settings.mainTitlePos);
+        drawCanvasText(settings.subTitle, settings.subTitleStyle, settings.subTitlePos);
 
-        const absX = `(w-tw)/2+${offsetX}`;
-        const absY = `(h-th)/2+${offsetY}`;
+        const pngBytes = await new Promise<Uint8Array>((resolve) => {
+          cvs.toBlob(async (blob) => {
+            if (!blob) { resolve(new Uint8Array()); return; }
+            resolve(new Uint8Array(await blob.arrayBuffer()));
+          }, 'image/png');
+        });
 
-        drawTextFilters.push(`drawtext=fontfile=notosans.ttf:textfile=${txtFilename}:fontcolor=${fontcolor}:fontsize=${fontSize}:x=${absX}:y=${absY}:shadowcolor=${shadowcolor}:shadowx=${shadowx}:shadowy=${shadowy}`);
-      };
-
-      await addDrawText(settings.mainTitle, settings.mainTitleStyle, settings.mainTitlePos);
-      await addDrawText(settings.subTitle, settings.subTitleStyle, settings.subTitlePos);
-
-      if (drawTextFilters.length > 0) {
-        filterComplex += `${vStream}${drawTextFilters.join(',')}[outv]; `;
+        if (pngBytes.length > 0) {
+          titleOverlayFilename = 'title_overlay.png';
+          await ff.writeFile(titleOverlayFilename, pngBytes);
+          const overlayIdx = inputs.length + (hasBgm ? 1 : 0);
+          filterComplex += `[outv_concat][${overlayIdx}:v]overlay=0:0[outv]; `;
+        } else {
+          filterComplex += `[outv_concat]copy[outv]; `;
+        }
       } else {
-        filterComplex += `${vStream}copy[outv]; `;
+        filterComplex += `[outv_concat]copy[outv]; `;
       }
 
       if (hasBgm) {
@@ -538,49 +551,34 @@ export const performExport = async (store: MatrixStore, quantity: number = 1) =>
         filterComplex += `[outa_raw]acopy[outa]`;
       }
 
-      // 组装所有 -i 参数 (视频 + 可选 BGM)
+      // 组装 -i 参数 (视频 + BGM + 文字叠层)
       const ffmpegArgs: string[] = [];
-      inputs.forEach(i => {
-        ffmpegArgs.push('-i', i.filename);
-      });
+      inputs.forEach(i => { ffmpegArgs.push('-i', i.filename); });
       if (hasBgm) ffmpegArgs.push('-i', bgmFilename);
+      if (titleOverlayFilename) ffmpegArgs.push('-i', titleOverlayFilename);
 
       ffmpegArgs.push('-filter_complex', filterComplex);
       ffmpegArgs.push('-map', '[outv]');
       ffmpegArgs.push('-map', '[outa]');
-
-      // aac重编码确保音频正常播放
       ffmpegArgs.push('-c:v', 'libx264');
       ffmpegArgs.push('-c:a', 'aac');
       ffmpegArgs.push('-preset', 'ultrafast');
-      ffmpegArgs.push('-pix_fmt', 'yuv420p'); // 增加色彩空间兼容性
+      ffmpegArgs.push('-pix_fmt', 'yuv420p');
       ffmpegArgs.push('output.mp4');
 
       console.log("Executing FFmpeg with args:", ffmpegArgs);
 
-      // 5. 执行渲染
       const retCode = await ff.exec(ffmpegArgs);
-      if (retCode !== 0) {
-        throw new Error(`FFmpeg 执行失败，退出码: ${retCode}`);
-      }
+      if (retCode !== 0) throw new Error(`FFmpeg 执行失败，退出码: ${retCode}`);
 
-      // 6. 读取结果
       const outputData = await ff.readFile('output.mp4');
       const blob = new Blob([outputData as any], { type: 'video/mp4' });
       const resultUrl = URL.createObjectURL(blob);
 
-      // 7. 清理内存，防止浏览器 OOM崩溃
       await ff.deleteFile('output.mp4');
-      for (const input of inputs) {
-        await ff.deleteFile(input.filename);
-      }
-      if (hasBgm && bgmFilename) {
-        await ff.deleteFile(bgmFilename);
-      }
-      try { await ff.deleteFile('notosans.ttf'); } catch (e) { }
-      for (const tfile of titleFiles) {
-        try { await ff.deleteFile(tfile); } catch (e) { }
-      }
+      for (const input of inputs) { await ff.deleteFile(input.filename); }
+      if (hasBgm && bgmFilename) { await ff.deleteFile(bgmFilename); }
+      if (titleOverlayFilename) { try { await ff.deleteFile(titleOverlayFilename); } catch (_) { } }
 
       // 更新 UI 任务状态
       updateExportTask(taskId, {
