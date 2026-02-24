@@ -1648,10 +1648,10 @@ const SettingsPanel = () => {
       const zip = new JSZip();
 
       // Fetch all blobs and add to zip
-      await Promise.all(doneExports.map(async (exp, index) => {
+      await Promise.all(doneExports.map(async (exp) => {
         const response = await fetch(exp.resultUrl!);
         const blob = await response.blob();
-        zip.file(`matrix_video_${index + 1}_${exp.id.slice(0, 4)}.mp4`, blob);
+        zip.file(`${exp.createdAt}.mp4`, blob);
       }));
 
       const zipBlob = await zip.generateAsync({ type: 'blob' });
