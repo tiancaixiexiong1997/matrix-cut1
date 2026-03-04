@@ -81,13 +81,15 @@ export type TextStyle = {
   shadowAngle: number;
 };
 
+export type TextElement = {
+  id: string;
+  text: string;
+  pos: { x: number; y: number };
+  style: TextStyle;
+};
+
 export type GlobalSettings = {
-  mainTitle: string;
-  subTitle: string;
-  mainTitlePos: { x: number; y: number };
-  subTitlePos: { x: number; y: number };
-  mainTitleStyle: TextStyle;
-  subTitleStyle: TextStyle;
+  texts: TextElement[];
 };
 
 export type ExportStatus = 'idle' | 'processing' | 'done' | 'error';
@@ -129,6 +131,10 @@ interface MatrixStore {
   reorderTimelineSegments: (oldIndex: number, newIndex: number) => void;
 
   updateSettings: (updates: Partial<GlobalSettings>) => void;
+  addTextElement: () => void;
+  removeTextElement: (id: string) => void;
+  updateTextElement: (id: string, updates: Partial<TextElement>) => void;
+
   updateBgm: (updates: Partial<BgmSettings>) => void;
 
   addExportTask: (task: ExportTask) => void;
@@ -143,12 +149,20 @@ export const useStore = create<MatrixStore>((set) => ({
   timeline: [],
   bgm: { files: [], bgmVolume: 0.5, videoVolume: 1.0 },
   settings: {
-    mainTitle: '为什么你做不出爆款？',
-    subTitle: '掌握这个黄金三秒法则',
-    mainTitlePos: { x: 0, y: -220 }, // 相对于中心的偏移
-    subTitlePos: { x: 0, y: 220 },
-    mainTitleStyle: { fontFamily: 'serif', fontSize: 32, color: '#ffffff', shadowColor: '#000000', shadowOpacity: 0.9, shadowBlur: 15, shadowDistance: 5, shadowAngle: -45 },
-    subTitleStyle: { fontFamily: 'serif', fontSize: 24, color: '#fb923c', shadowColor: '#000000', shadowOpacity: 0.9, shadowBlur: 10, shadowDistance: 5, shadowAngle: -45 }
+    texts: [
+      {
+        id: 'default-main-' + Date.now(),
+        text: '为什么你做不出爆款？',
+        pos: { x: 0, y: -220 },
+        style: { fontFamily: 'serif', fontSize: 32, color: '#ffffff', shadowColor: '#000000', shadowOpacity: 0.9, shadowBlur: 15, shadowDistance: 5, shadowAngle: -45 }
+      },
+      {
+        id: 'default-sub-' + Date.now(),
+        text: '掌握这个黄金三秒法则',
+        pos: { x: 0, y: 220 },
+        style: { fontFamily: 'serif', fontSize: 24, color: '#fb923c', shadowColor: '#000000', shadowOpacity: 0.9, shadowBlur: 10, shadowDistance: 5, shadowAngle: -45 }
+      }
+    ]
   },
   customFonts: [],
   exports: [],
@@ -238,6 +252,32 @@ export const useStore = create<MatrixStore>((set) => ({
   })),
 
   setFfmpegStatus: (status) => set({ ffmpegStatus: status }),
+
+  addTextElement: () => set((state) => ({
+    settings: {
+      ...state.settings,
+      texts: [...state.settings.texts, {
+        id: 'text-' + Date.now().toString() + '-' + Math.random().toString(36).substr(2, 5),
+        text: '新字幕内容',
+        pos: { x: 0, y: 0 },
+        style: { fontFamily: 'serif', fontSize: 24, color: '#ffffff', shadowColor: '#000000', shadowOpacity: 0.9, shadowBlur: 10, shadowDistance: 5, shadowAngle: -45 }
+      }]
+    }
+  })),
+
+  removeTextElement: (id) => set((state) => ({
+    settings: {
+      ...state.settings,
+      texts: state.settings.texts.filter(t => t.id !== id)
+    }
+  })),
+
+  updateTextElement: (id, updates) => set((state) => ({
+    settings: {
+      ...state.settings,
+      texts: state.settings.texts.map(t => t.id === id ? { ...t, ...updates } : t)
+    }
+  }))
 }));
 
 // ==========================================
@@ -501,9 +541,7 @@ export const performExport = async (store: MatrixStore, quantity: number = 1) =>
       const OW = 1080, OH = 1920;
       const scaleM = OH / 600;
       let titleOverlayFilename = '';
-      const hasAnyTitle =
-        (settings.mainTitle && settings.mainTitle.trim() !== '') ||
-        (settings.subTitle && settings.subTitle.trim() !== '');
+      const hasAnyTitle = settings.texts && settings.texts.length > 0 && settings.texts.some(t => t.text.trim() !== '');
 
       if (hasAnyTitle) {
         const cvs = document.createElement('canvas');
@@ -529,8 +567,9 @@ export const performExport = async (store: MatrixStore, quantity: number = 1) =>
           ctx.restore();
         };
 
-        drawCanvasText(settings.mainTitle, settings.mainTitleStyle, settings.mainTitlePos);
-        drawCanvasText(settings.subTitle, settings.subTitleStyle, settings.subTitlePos);
+        settings.texts.forEach(t => {
+          drawCanvasText(t.text, t.style, t.pos);
+        });
 
         const pngBytes = await new Promise<Uint8Array>((resolve) => {
           cvs.toBlob(async (blob) => {
@@ -1214,7 +1253,7 @@ const WorkspaceArea = () => {
   const [currentTime, setCurrentTime] = useState(0);
   const [previewIndices, setPreviewIndices] = useState<Record<string, number>>({});
   const [selectedSegIds, setSelectedSegIds] = useState<Set<string>>(new Set());
-  const { timeline, pools, settings, bgm, addTimelineSegment, updateTimelineSegment, removeTimelineSegment, duplicateTimelineSegment, reorderTimelineSegments, updateSettings } = useStore();
+  const { timeline, pools, settings, bgm, addTimelineSegment, updateTimelineSegment, removeTimelineSegment, duplicateTimelineSegment, reorderTimelineSegments, updateTextElement } = useStore();
   const videoRef = React.useRef<HTMLVideoElement>(null);
   const bgmAudioRef = React.useRef<HTMLAudioElement | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
@@ -1441,40 +1480,26 @@ const WorkspaceArea = () => {
 
           <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-black/20 z-10 pointer-events-none" />
 
-          <DraggableOverlay
-            text={
-              <h2
-                className="font-bold pointer-events-none text-center"
-                style={{
-                  fontFamily: settings.mainTitleStyle.fontFamily,
-                  fontSize: `${settings.mainTitleStyle.fontSize}px`,
-                  color: settings.mainTitleStyle.color,
-                  textShadow: `${settings.mainTitleStyle.shadowDistance * Math.cos(settings.mainTitleStyle.shadowAngle * Math.PI / 180)}px ${settings.mainTitleStyle.shadowDistance * -Math.sin(settings.mainTitleStyle.shadowAngle * Math.PI / 180)}px ${settings.mainTitleStyle.shadowBlur}px rgba(${parseInt(settings.mainTitleStyle.shadowColor.slice(1, 3), 16)}, ${parseInt(settings.mainTitleStyle.shadowColor.slice(3, 5), 16)}, ${parseInt(settings.mainTitleStyle.shadowColor.slice(5, 7), 16)}, ${settings.mainTitleStyle.shadowOpacity})`
-                }}
-              >
-                {settings.mainTitle}
-              </h2>
-            }
-            pos={settings.mainTitlePos}
-            onPosChange={(pos) => updateSettings({ mainTitlePos: pos })}
-          />
-          <DraggableOverlay
-            text={
-              <p
-                className="font-medium pointer-events-none text-center inline-block"
-                style={{
-                  fontFamily: settings.subTitleStyle.fontFamily,
-                  fontSize: `${settings.subTitleStyle.fontSize}px`,
-                  color: settings.subTitleStyle.color,
-                  textShadow: `${settings.subTitleStyle.shadowDistance * Math.cos(settings.subTitleStyle.shadowAngle * Math.PI / 180)}px ${settings.subTitleStyle.shadowDistance * -Math.sin(settings.subTitleStyle.shadowAngle * Math.PI / 180)}px ${settings.subTitleStyle.shadowBlur}px rgba(${parseInt(settings.subTitleStyle.shadowColor.slice(1, 3), 16)}, ${parseInt(settings.subTitleStyle.shadowColor.slice(3, 5), 16)}, ${parseInt(settings.subTitleStyle.shadowColor.slice(5, 7), 16)}, ${settings.subTitleStyle.shadowOpacity})`
-                }}
-              >
-                {settings.subTitle}
-              </p>
-            }
-            pos={settings.subTitlePos}
-            onPosChange={(pos) => updateSettings({ subTitlePos: pos })}
-          />
+          {settings.texts && settings.texts.map(textElem => (
+            <DraggableOverlay
+              key={textElem.id}
+              text={
+                <p
+                  className="font-bold pointer-events-none text-center"
+                  style={{
+                    fontFamily: textElem.style.fontFamily,
+                    fontSize: `${textElem.style.fontSize}px`,
+                    color: textElem.style.color,
+                    textShadow: `${textElem.style.shadowDistance * Math.cos(textElem.style.shadowAngle * Math.PI / 180)}px ${textElem.style.shadowDistance * -Math.sin(textElem.style.shadowAngle * Math.PI / 180)}px ${textElem.style.shadowBlur}px rgba(${parseInt(textElem.style.shadowColor.slice(1, 3), 16)}, ${parseInt(textElem.style.shadowColor.slice(3, 5), 16)}, ${parseInt(textElem.style.shadowColor.slice(5, 7), 16)}, ${textElem.style.shadowOpacity})`
+                  }}
+                >
+                  {textElem.text}
+                </p>
+              }
+              pos={textElem.pos}
+              onPosChange={(pos) => updateTextElement(textElem.id, { pos })}
+            />
+          ))}
 
           <button
             onClick={() => {
@@ -1645,7 +1670,7 @@ const WorkspaceArea = () => {
 // 4. 右侧设置与导出 (Settings)
 // -------------------------
 const SettingsPanel = () => {
-  const { settings, exports, customFonts, updateSettings, addCustomFont } = useStore();
+  const { settings, exports, customFonts, addCustomFont, addTextElement, removeTextElement, updateTextElement } = useStore();
   const [isZipping, setIsZipping] = useState(false);
   const fontInputRef = React.useRef<HTMLInputElement>(null);
 
@@ -1751,133 +1776,98 @@ const SettingsPanel = () => {
           )}
         </GlassPanel>
 
-        {/* 文本覆盖 */}
+        {/* 图文覆盖 */}
         <GlassPanel className="p-4 rounded-xl space-y-4">
-          <h3 className="text-xs font-semibold text-white/60 mb-2 flex items-center gap-1.5 uppercase tracking-wider">
-            <Type className="w-3.5 h-3.5" /> 图文覆盖
-          </h3>
+          <div className="flex items-center justify-between">
+            <h3 className="text-xs font-semibold text-white/60 flex items-center gap-1.5 uppercase tracking-wider">
+              <Type className="w-3.5 h-3.5" /> 图文覆盖
+            </h3>
+            <button
+              onClick={addTextElement}
+              className="text-[10px] bg-blue-500/20 text-blue-300 hover:bg-blue-500/40 px-2 py-1 rounded border border-blue-500/30 transition flex items-center gap-1"
+            >
+              <Plus className="w-3 h-3" /> 添加字幕
+            </button>
+          </div>
+
           <div className="space-y-4">
-            {/* 主标题设置 */}
-            <div className="space-y-2">
-              <label className="text-xs font-medium text-white/50 flex items-center justify-between">主标题内容</label>
-              <input
-                type="text"
-                value={settings.mainTitle}
-                onChange={e => updateSettings({ mainTitle: e.target.value })}
-                className="w-full bg-black/40 border border-white/10 rounded px-2.5 py-1.5 text-sm text-white focus:outline-none focus:border-orange-500/50"
-              />
-              <div className="space-y-2 mt-2">
-                <div className="flex bg-black/40 border border-white/10 rounded px-2 py-1 items-center justify-between">
-                  <span className="text-[10px] text-white/40">字形参数</span>
-                  <div className="flex items-center gap-2">
-                    <select
-                      value={settings.mainTitleStyle.fontFamily}
-                      onChange={e => updateSettings({ mainTitleStyle: { ...settings.mainTitleStyle, fontFamily: e.target.value } })}
-                      className="w-24 bg-zinc-800 rounded px-1 text-[10px] text-white outline-none"
-                    >
-                      <option value="serif">宋体/Serif</option>
-                      <option value="sans-serif">黑体/Sans</option>
-                      <option value="monospace">等宽/Mono</option>
-                      {customFonts.map(f => <option key={f.url} value={f.url}>{f.name}</option>)}
-                    </select>
-                    <input type="number" min="10" max="100" title="字号" value={settings.mainTitleStyle.fontSize} onChange={e => updateSettings({ mainTitleStyle: { ...settings.mainTitleStyle, fontSize: parseInt(e.target.value) || 32 } })} className="w-12 bg-zinc-800 rounded px-1 text-[10px] text-white outline-none" />
-                    <input type="color" title="颜色" value={settings.mainTitleStyle.color} onChange={e => updateSettings({ mainTitleStyle: { ...settings.mainTitleStyle, color: e.target.value } })} className="w-6 h-4 bg-transparent cursor-pointer rounded-sm" />
-                  </div>
-                </div>
-
-                <div className="bg-black/40 border border-white/10 rounded p-2 space-y-3">
+            {(!settings.texts || settings.texts.length === 0) ? (
+              <div className="text-[10px] text-white/40 text-center py-4">暂无字幕，点击右上方添加</div>
+            ) : (
+              settings.texts.map((textElem, index) => (
+                <div key={textElem.id} className="space-y-2 pt-3 border-t border-white/5 first:border-0 first:pt-0">
                   <div className="flex items-center justify-between">
-                    <span className="text-[10px] text-white/40 flex items-center gap-1">✅ 阴影高级配置</span>
-                    <input type="color" value={settings.mainTitleStyle.shadowColor} onChange={e => updateSettings({ mainTitleStyle: { ...settings.mainTitleStyle, shadowColor: e.target.value } })} className="w-5 h-4 bg-transparent cursor-pointer rounded-sm" />
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <span className="text-[10px] text-white/40 w-12 shrink-0">不透明度</span>
-                    <input type="range" min="0" max="1" step="0.05" value={settings.mainTitleStyle.shadowOpacity} onChange={e => updateSettings({ mainTitleStyle: { ...settings.mainTitleStyle, shadowOpacity: parseFloat(e.target.value) || 0 } })} className="flex-1 h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-orange-500" />
-                    <span className="text-[10px] text-white/40 w-8 text-right">{Math.round(settings.mainTitleStyle.shadowOpacity * 100)}%</span>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <span className="text-[10px] text-white/40 w-12 shrink-0">模糊度</span>
-                    <input type="range" min="0" max="100" value={settings.mainTitleStyle.shadowBlur} onChange={e => updateSettings({ mainTitleStyle: { ...settings.mainTitleStyle, shadowBlur: parseFloat(e.target.value) || 0 } })} className="flex-1 h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-orange-500" />
-                    <span className="text-[10px] text-white/40 w-8 text-right">{settings.mainTitleStyle.shadowBlur}%</span>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <span className="text-[10px] text-white/40 w-12 shrink-0">距离</span>
-                    <input type="range" min="0" max="100" value={settings.mainTitleStyle.shadowDistance} onChange={e => updateSettings({ mainTitleStyle: { ...settings.mainTitleStyle, shadowDistance: parseFloat(e.target.value) || 0 } })} className="flex-1 h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-orange-500" />
-                    <span className="text-[10px] text-white/40 w-8 text-right">{settings.mainTitleStyle.shadowDistance}</span>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <span className="text-[10px] text-white/40 w-12 shrink-0">角度</span>
-                    <input type="range" min="-180" max="180" value={settings.mainTitleStyle.shadowAngle} onChange={e => updateSettings({ mainTitleStyle: { ...settings.mainTitleStyle, shadowAngle: parseFloat(e.target.value) || 0 } })} className="flex-1 h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-orange-500" />
-                    <span className="text-[10px] text-white/40 w-8 text-right">{settings.mainTitleStyle.shadowAngle}°</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* 副标题设置 */}
-            <div className="space-y-2 pt-3 border-t border-white/5">
-              <label className="text-xs font-medium text-white/50 flex items-center justify-between">副标题内容</label>
-              <input
-                type="text"
-                value={settings.subTitle}
-                onChange={e => updateSettings({ subTitle: e.target.value })}
-                className="w-full bg-black/40 border border-white/10 rounded px-2.5 py-1.5 text-sm text-orange-400 focus:outline-none focus:border-orange-500/50"
-              />
-              <div className="space-y-2 mt-2">
-                <div className="flex bg-black/40 border border-white/10 rounded px-2 py-1 items-center justify-between">
-                  <span className="text-[10px] text-white/40">字形参数</span>
-                  <div className="flex items-center gap-2">
-                    <select
-                      value={settings.subTitleStyle.fontFamily}
-                      onChange={e => updateSettings({ subTitleStyle: { ...settings.subTitleStyle, fontFamily: e.target.value } })}
-                      className="w-24 bg-zinc-800 rounded px-1 text-[10px] text-white outline-none"
+                    <label className="text-[10px] font-medium text-white/50 flex items-center">
+                      字幕列 {index + 1}
+                    </label>
+                    <button
+                      onClick={() => removeTextElement(textElem.id)}
+                      className="text-[10px] text-red-400 hover:text-red-300 hover:bg-red-500/10 px-1.5 py-0.5 rounded transition"
                     >
-                      <option value="serif">宋体/Serif</option>
-                      <option value="sans-serif">黑体/Sans</option>
-                      <option value="monospace">等宽/Mono</option>
-                      {customFonts.map(f => <option key={f.url} value={f.url}>{f.name}</option>)}
-                    </select>
-                    <input type="number" min="10" max="100" title="字号" value={settings.subTitleStyle.fontSize} onChange={e => updateSettings({ subTitleStyle: { ...settings.subTitleStyle, fontSize: parseInt(e.target.value) || 24 } })} className="w-12 bg-zinc-800 rounded px-1 text-[10px] text-white outline-none" />
-                    <input type="color" title="颜色" value={settings.subTitleStyle.color} onChange={e => updateSettings({ subTitleStyle: { ...settings.subTitleStyle, color: e.target.value } })} className="w-6 h-4 bg-transparent cursor-pointer rounded-sm" />
+                      删除
+                    </button>
+                  </div>
+
+                  <input
+                    type="text"
+                    value={textElem.text}
+                    onChange={e => updateTextElement(textElem.id, { text: e.target.value })}
+                    className="w-full bg-black/40 border border-white/10 rounded px-2.5 py-1.5 text-sm text-white focus:outline-none focus:border-orange-500/50"
+                  />
+
+                  <div className="space-y-2 mt-2">
+                    <div className="flex bg-black/40 border border-white/10 rounded px-2 py-1 items-center justify-between">
+                      <span className="text-[10px] text-white/40">字形参数</span>
+                      <div className="flex items-center gap-2">
+                        <select
+                          value={textElem.style.fontFamily}
+                          onChange={e => updateTextElement(textElem.id, { style: { ...textElem.style, fontFamily: e.target.value } })}
+                          className="w-24 bg-zinc-800 rounded px-1 text-[10px] text-white outline-none"
+                        >
+                          <option value="serif">宋体/Serif</option>
+                          <option value="sans-serif">黑体/Sans</option>
+                          <option value="monospace">等宽/Mono</option>
+                          {customFonts.map(f => <option key={f.url} value={f.name}>{f.name}</option>)}
+                        </select>
+                        <input type="number" min="10" max="100" title="字号" value={textElem.style.fontSize} onChange={e => updateTextElement(textElem.id, { style: { ...textElem.style, fontSize: parseInt(e.target.value) || 24 } })} className="w-12 bg-zinc-800 rounded px-1 text-[10px] text-white outline-none" />
+                        <input type="color" title="颜色" value={textElem.style.color} onChange={e => updateTextElement(textElem.id, { style: { ...textElem.style, color: e.target.value } })} className="w-6 h-4 bg-transparent cursor-pointer rounded-sm" />
+                      </div>
+                    </div>
+
+                    <div className="bg-black/40 border border-white/10 rounded p-2 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] text-white/40 flex items-center gap-1">✅ 阴影高级配置</span>
+                        <input type="color" value={textElem.style.shadowColor} onChange={e => updateTextElement(textElem.id, { style: { ...textElem.style, shadowColor: e.target.value } })} className="w-5 h-4 bg-transparent cursor-pointer rounded-sm" />
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] text-white/40 w-12 shrink-0">不透明度</span>
+                        <input type="range" min="0" max="1" step="0.05" value={textElem.style.shadowOpacity} onChange={e => updateTextElement(textElem.id, { style: { ...textElem.style, shadowOpacity: parseFloat(e.target.value) || 0 } })} className="flex-1 h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-orange-500" />
+                        <span className="text-[10px] text-white/40 w-8 text-right">{Math.round(textElem.style.shadowOpacity * 100)}%</span>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] text-white/40 w-12 shrink-0">模糊度</span>
+                        <input type="range" min="0" max="100" value={textElem.style.shadowBlur} onChange={e => updateTextElement(textElem.id, { style: { ...textElem.style, shadowBlur: parseFloat(e.target.value) || 0 } })} className="flex-1 h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-orange-500" />
+                        <span className="text-[10px] text-white/40 w-8 text-right">{textElem.style.shadowBlur}%</span>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] text-white/40 w-12 shrink-0">距离</span>
+                        <input type="range" min="0" max="100" value={textElem.style.shadowDistance} onChange={e => updateTextElement(textElem.id, { style: { ...textElem.style, shadowDistance: parseFloat(e.target.value) || 0 } })} className="flex-1 h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-orange-500" />
+                        <span className="text-[10px] text-white/40 w-8 text-right">{textElem.style.shadowDistance}</span>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] text-white/40 w-12 shrink-0">角度</span>
+                        <input type="range" min="-180" max="180" value={textElem.style.shadowAngle} onChange={e => updateTextElement(textElem.id, { style: { ...textElem.style, shadowAngle: parseFloat(e.target.value) || 0 } })} className="flex-1 h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-orange-500" />
+                        <span className="text-[10px] text-white/40 w-8 text-right">{textElem.style.shadowAngle}°</span>
+                      </div>
+                    </div>
                   </div>
                 </div>
-
-                <div className="bg-black/40 border border-white/10 rounded p-2 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] text-white/40 flex items-center gap-1">✅ 阴影高级配置</span>
-                    <input type="color" value={settings.subTitleStyle.shadowColor} onChange={e => updateSettings({ subTitleStyle: { ...settings.subTitleStyle, shadowColor: e.target.value } })} className="w-5 h-4 bg-transparent cursor-pointer rounded-sm" />
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <span className="text-[10px] text-white/40 w-12 shrink-0">不透明度</span>
-                    <input type="range" min="0" max="1" step="0.05" value={settings.subTitleStyle.shadowOpacity} onChange={e => updateSettings({ subTitleStyle: { ...settings.subTitleStyle, shadowOpacity: parseFloat(e.target.value) || 0 } })} className="flex-1 h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-orange-500" />
-                    <span className="text-[10px] text-white/40 w-8 text-right">{Math.round(settings.subTitleStyle.shadowOpacity * 100)}%</span>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <span className="text-[10px] text-white/40 w-12 shrink-0">模糊度</span>
-                    <input type="range" min="0" max="100" value={settings.subTitleStyle.shadowBlur} onChange={e => updateSettings({ subTitleStyle: { ...settings.subTitleStyle, shadowBlur: parseFloat(e.target.value) || 0 } })} className="flex-1 h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-orange-500" />
-                    <span className="text-[10px] text-white/40 w-8 text-right">{settings.subTitleStyle.shadowBlur}%</span>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <span className="text-[10px] text-white/40 w-12 shrink-0">距离</span>
-                    <input type="range" min="0" max="100" value={settings.subTitleStyle.shadowDistance} onChange={e => updateSettings({ subTitleStyle: { ...settings.subTitleStyle, shadowDistance: parseFloat(e.target.value) || 0 } })} className="flex-1 h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-orange-500" />
-                    <span className="text-[10px] text-white/40 w-8 text-right">{settings.subTitleStyle.shadowDistance}</span>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <span className="text-[10px] text-white/40 w-12 shrink-0">角度</span>
-                    <input type="range" min="-180" max="180" value={settings.subTitleStyle.shadowAngle} onChange={e => updateSettings({ subTitleStyle: { ...settings.subTitleStyle, shadowAngle: parseFloat(e.target.value) || 0 } })} className="flex-1 h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-orange-500" />
-                    <span className="text-[10px] text-white/40 w-8 text-right">{settings.subTitleStyle.shadowAngle}°</span>
-                  </div>
-                </div>
-              </div>
-            </div>
+              ))
+            )}
           </div>
         </GlassPanel>
 
