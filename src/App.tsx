@@ -19,7 +19,7 @@ import { CSS } from '@dnd-kit/utilities';
 import {
   Play, Pause, Plus, Trash2, FolderPlus, Download,
   Settings, Type, Film, Zap, Clock, FolderOpen, Music2,
-  Layers, Archive, ChevronDown, ChevronRight, X, Copy
+  Layers, Archive, ChevronDown, ChevronRight, X, Copy, Image as ImageIcon
 } from 'lucide-react';
 import { create } from 'zustand';
 import { v4 as uuidv4 } from 'uuid';
@@ -89,8 +89,17 @@ export type TextElement = {
   style: TextStyle;
 };
 
+export type ImageElement = {
+  id: string;
+  file: File;
+  url: string; // ObjectURL for preview
+  pos: { x: number; y: number };
+  scale: number;
+};
+
 export type GlobalSettings = {
   texts: TextElement[];
+  images: ImageElement[];
   antiDupConfig: {
     enabled: boolean;
     intensity: 'light' | 'medium' | 'heavy';
@@ -140,6 +149,10 @@ interface MatrixStore {
   removeTextElement: (id: string) => void;
   updateTextElement: (id: string, updates: Partial<TextElement>) => void;
 
+  addImageElement: (file: File) => void;
+  removeImageElement: (id: string) => void;
+  updateImageElement: (id: string, updates: Partial<ImageElement>) => void;
+
   updateBgm: (updates: Partial<BgmSettings>) => void;
 
   addExportTask: (task: ExportTask) => void;
@@ -162,6 +175,7 @@ export const useStore = create<MatrixStore>((set) => ({
         style: { fontFamily: 'SimHei, Heiti SC, sans-serif', fontSize: 32, color: '#ffffff', shadowColor: '#000000', shadowOpacity: 0.9, shadowBlur: 15, shadowDistance: 5, shadowAngle: -45 }
       }
     ],
+    images: [],
     antiDupConfig: {
       enabled: false,
       intensity: 'light'
@@ -279,6 +293,33 @@ export const useStore = create<MatrixStore>((set) => ({
     settings: {
       ...state.settings,
       texts: state.settings.texts.map(t => t.id === id ? { ...t, ...updates } : t)
+    }
+  })),
+
+  addImageElement: (file) => set((state) => ({
+    settings: {
+      ...state.settings,
+      images: [...state.settings.images, {
+        id: 'img-' + Date.now().toString() + '-' + Math.random().toString(36).substr(2, 5),
+        file,
+        url: URL.createObjectURL(file),
+        pos: { x: 0, y: 0 },
+        scale: 1.0
+      }]
+    }
+  })),
+
+  removeImageElement: (id) => set((state) => ({
+    settings: {
+      ...state.settings,
+      images: state.settings.images.filter(img => img.id !== id)
+    }
+  })),
+
+  updateImageElement: (id, updates) => set((state) => ({
+    settings: {
+      ...state.settings,
+      images: state.settings.images.map(img => img.id === id ? { ...img, ...updates } : img)
     }
   }))
 }));
@@ -615,12 +656,37 @@ export const performExport = async (store: MatrixStore, quantity: number = 1) =>
           titleOverlayFilename = 'title_overlay.png';
           await ff.writeFile(titleOverlayFilename, pngBytes);
           const overlayIdx = inputs.length + (hasBgm ? 1 : 0);
-          filterComplex += `[outv_concat][${overlayIdx}:v]overlay=0:0[outv]; `;
+          filterComplex += `[outv_concat][${overlayIdx}:v]overlay=0:0[outv_texts]; `;
         } else {
-          filterComplex += `[outv_concat]copy[outv]; `;
+          filterComplex += `[outv_concat]copy[outv_texts]; `;
         }
       } else {
-        filterComplex += `[outv_concat]copy[outv]; `;
+        filterComplex += `[outv_concat]copy[outv_texts]; `;
+      }
+
+      // ── 图片贴纸叠加 ──
+      const imageFilenames: string[] = [];
+      const hasImages = settings.images && settings.images.length > 0;
+
+      if (hasImages) {
+        let lastImageOut = 'outv_texts';
+        for (let i = 0; i < settings.images.length; i++) {
+          const imgElem = settings.images[i];
+          const imgExt = imgElem.file.name.split('.').pop() || 'png';
+          const imgName = `custom_img_${i}.${imgExt}`;
+          await ff.writeFile(imgName, await fetchFile(imgElem.file));
+          imageFilenames.push(imgName);
+
+          const imgInputIdx = inputs.length + (hasBgm ? 1 : 0) + (titleOverlayFilename ? 1 : 0) + i;
+          const nextOut = i === settings.images.length - 1 ? 'outv' : `outv_img_${i}`;
+
+          // x=W/2 + pos.x - w/2  => 将锚点置于贴图中心，并支持 scale
+          filterComplex += `[${imgInputIdx}:v]scale=iw*${imgElem.scale}:ih*${imgElem.scale}[scaled_img_${i}]; `;
+          filterComplex += `[${lastImageOut}][scaled_img_${i}]overlay=(W-w)/2+${imgElem.pos.x * scaleM}:(H-h)/2+${imgElem.pos.y * scaleM}[${nextOut}]; `;
+          lastImageOut = nextOut;
+        }
+      } else {
+        filterComplex += `[outv_texts]copy[outv]; `;
       }
 
       if (hasBgm) {
@@ -633,11 +699,12 @@ export const performExport = async (store: MatrixStore, quantity: number = 1) =>
         filterComplex += `[outa_raw]acopy[outa]`;
       }
 
-      // 组装 -i 参数 (视频 + BGM + 文字叠层)
+      // 组装 -i 参数 (视频 + BGM + 文字叠层 + 图片叠层)
       const ffmpegArgs: string[] = [];
       inputs.forEach(i => { ffmpegArgs.push('-i', i.filename); });
       if (hasBgm) ffmpegArgs.push('-i', bgmFilename);
       if (titleOverlayFilename) ffmpegArgs.push('-i', titleOverlayFilename);
+      imageFilenames.forEach(img => { ffmpegArgs.push('-i', img); });
 
       if (settings.antiDupConfig?.enabled) {
         ffmpegArgs.push('-map_metadata', '-1'); // Strip all metadata
@@ -665,6 +732,7 @@ export const performExport = async (store: MatrixStore, quantity: number = 1) =>
       for (const input of inputs) { await ff.deleteFile(input.filename); }
       if (hasBgm && bgmFilename) { await ff.deleteFile(bgmFilename); }
       if (titleOverlayFilename) { try { await ff.deleteFile(titleOverlayFilename); } catch (_) { } }
+      for (const imgName of imageFilenames) { try { await ff.deleteFile(imgName); } catch (_) { } }
 
       // 更新 UI 任务状态
       updateExportTask(taskId, {
@@ -1235,12 +1303,12 @@ const SortableSegment = ({
 };
 
 const DraggableOverlay = ({
-  text,
+  children,
   pos,
   onPosChange,
   className
 }: {
-  text: React.ReactNode;
+  children: React.ReactNode;
   pos: { x: number; y: number };
   onPosChange: (pos: { x: number; y: number }) => void;
   className?: string;
@@ -1280,7 +1348,7 @@ const DraggableOverlay = ({
       onPointerUp={handlePointerUp}
       onPointerCancel={handlePointerUp}
     >
-      {text}
+      {children}
     </div>
   );
 };
@@ -1290,7 +1358,7 @@ const WorkspaceArea = () => {
   const [currentTime, setCurrentTime] = useState(0);
   const [previewIndices, setPreviewIndices] = useState<Record<string, number>>({});
   const [selectedSegIds, setSelectedSegIds] = useState<Set<string>>(new Set());
-  const { timeline, pools, settings, bgm, addTimelineSegment, updateTimelineSegment, removeTimelineSegment, duplicateTimelineSegment, reorderTimelineSegments, updateTextElement } = useStore();
+  const { timeline, pools, settings, bgm, addTimelineSegment, updateTimelineSegment, removeTimelineSegment, duplicateTimelineSegment, reorderTimelineSegments, updateTextElement, updateImageElement } = useStore();
   const videoRef = React.useRef<HTMLVideoElement>(null);
   const bgmAudioRef = React.useRef<HTMLAudioElement | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
@@ -1382,10 +1450,18 @@ const WorkspaceArea = () => {
           }))
         };
 
+        const restoredSettings = {
+          ...draft.settings,
+          images: draft.settings?.images ? draft.settings.images.map((img: any) => ({
+            ...img,
+            url: URL.createObjectURL(img.file)
+          })) : []
+        };
+
         useStore.setState({
           pools: restoredPools,
           timeline: draft.timeline,
-          settings: draft.settings,
+          settings: restoredSettings,
           bgm: restoredBgm
         });
         console.log('Restored draft from IndexedDB');
@@ -1578,22 +1654,36 @@ const WorkspaceArea = () => {
           {settings.texts && settings.texts.map(textElem => (
             <DraggableOverlay
               key={textElem.id}
-              text={
-                <p
-                  className="font-bold pointer-events-none text-center"
-                  style={{
-                    fontFamily: textElem.style.fontFamily,
-                    fontSize: `${textElem.style.fontSize}px`,
-                    color: textElem.style.color,
-                    textShadow: `${textElem.style.shadowDistance * Math.cos(textElem.style.shadowAngle * Math.PI / 180)}px ${textElem.style.shadowDistance * -Math.sin(textElem.style.shadowAngle * Math.PI / 180)}px ${textElem.style.shadowBlur}px rgba(${parseInt(textElem.style.shadowColor.slice(1, 3), 16)}, ${parseInt(textElem.style.shadowColor.slice(3, 5), 16)}, ${parseInt(textElem.style.shadowColor.slice(5, 7), 16)}, ${textElem.style.shadowOpacity})`
-                  }}
-                >
-                  {textElem.text}
-                </p>
-              }
               pos={textElem.pos}
               onPosChange={(pos) => updateTextElement(textElem.id, { pos })}
-            />
+            >
+              <p
+                className="font-bold pointer-events-none text-center"
+                style={{
+                  fontFamily: textElem.style.fontFamily,
+                  fontSize: `${textElem.style.fontSize}px`,
+                  color: textElem.style.color,
+                  textShadow: `${textElem.style.shadowDistance * Math.cos(textElem.style.shadowAngle * Math.PI / 180)}px ${textElem.style.shadowDistance * -Math.sin(textElem.style.shadowAngle * Math.PI / 180)}px ${textElem.style.shadowBlur}px rgba(${parseInt(textElem.style.shadowColor.slice(1, 3), 16)}, ${parseInt(textElem.style.shadowColor.slice(3, 5), 16)}, ${parseInt(textElem.style.shadowColor.slice(5, 7), 16)}, ${textElem.style.shadowOpacity})`
+                }}
+              >
+                {textElem.text}
+              </p>
+            </DraggableOverlay>
+          ))}
+
+          {settings.images && settings.images.map(imgElem => (
+            <DraggableOverlay
+              key={imgElem.id}
+              pos={imgElem.pos}
+              onPosChange={(pos) => updateImageElement(imgElem.id, { pos })}
+            >
+              <img
+                src={imgElem.url}
+                alt="overlay"
+                className="pointer-events-none select-none max-w-none origin-center"
+                style={{ transform: `scale(${imgElem.scale})` }}
+              />
+            </DraggableOverlay>
           ))}
 
           <button
@@ -1765,9 +1855,10 @@ const WorkspaceArea = () => {
 // 4. 右侧设置与导出 (Settings)
 // -------------------------
 const SettingsPanel = () => {
-  const { settings, exports, customFonts, updateSettings, addCustomFont, addTextElement, removeTextElement, updateTextElement } = useStore();
+  const { settings, exports, customFonts, updateSettings, addCustomFont, addTextElement, removeTextElement, updateTextElement, addImageElement, removeImageElement, updateImageElement } = useStore();
   const [isZipping, setIsZipping] = useState(false);
   const fontInputRef = React.useRef<HTMLInputElement>(null);
+  const imageInputRef = React.useRef<HTMLInputElement>(null);
 
   const handleClearDraft = async () => {
     if (window.confirm("确定要清空本地草稿吗？此操作将丢失所有未导出的进度与上传素材的关联！")) {
@@ -1804,6 +1895,13 @@ const SettingsPanel = () => {
     }
 
     if (fontInputRef.current) fontInputRef.current.value = '';
+  };
+
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    addImageElement(file);
+    e.target.value = '';
   };
 
   const handleDownloadZip = async () => {
@@ -1981,6 +2079,64 @@ const SettingsPanel = () => {
                       </div>
                     </div>
                   </div>
+                </div>
+              ))
+            )}
+          </div>
+        </GlassPanel>
+
+        {/* 自定义贴纸/图层 (PNG) */}
+        <GlassPanel className="p-4 rounded-xl space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-xs font-semibold text-white/60 flex items-center gap-1.5 uppercase tracking-wider">
+              <ImageIcon className="w-3.5 h-3.5" /> 自定义图片水印/徽标
+            </h3>
+            <button
+              onClick={() => imageInputRef.current?.click()}
+              className="text-[10px] bg-blue-500/20 text-blue-300 hover:bg-blue-500/40 px-2 py-1 rounded border border-blue-500/30 transition flex items-center gap-1"
+            >
+              <Plus className="w-3 h-3" /> 导入 PNG
+            </button>
+            <input
+              type="file"
+              accept="image/png"
+              ref={imageInputRef}
+              onChange={handleImageUpload}
+              className="hidden"
+            />
+          </div>
+
+          <div className="space-y-4">
+            {(!settings.images || settings.images.length === 0) ? (
+              <div className="text-[10px] text-white/40 text-center py-4">暂无图片标记，点击右上方导入</div>
+            ) : (
+              settings.images.map((imgElem, index) => (
+                <div key={imgElem.id} className="space-y-2 pt-3 border-t border-white/5 first:border-0 first:pt-0 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <img src={imgElem.url} alt="thumbnail" className="w-8 h-8 object-contain bg-black/50 rounded border border-white/10" />
+                    <div className="flex flex-col">
+                      <span className="text-[10px] font-medium text-white/50">图层 {index + 1}: {imgElem.file.name.substring(0, 10)}</span>
+                      <div className="flex items-center gap-1 mt-1">
+                        <span className="text-[8px] text-white/40">缩放大小:</span>
+                        <input
+                          type="range"
+                          min="0.1"
+                          max="3"
+                          step="0.05"
+                          value={imgElem.scale}
+                          onChange={e => updateImageElement(imgElem.id, { scale: parseFloat(e.target.value) || 1 })}
+                          className="w-16 h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-orange-500"
+                        />
+                        <span className="text-[8px] text-white/40">{Math.round(imgElem.scale * 100)}%</span>
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => removeImageElement(imgElem.id)}
+                    className="text-[10px] text-red-400 hover:text-red-300 hover:bg-red-500/10 px-1.5 py-0.5 rounded transition"
+                  >
+                    删除
+                  </button>
                 </div>
               ))
             )}
