@@ -2070,7 +2070,7 @@ const SettingsPanel = () => {
         <GlassPanel className="p-4 rounded-xl space-y-4">
           <div className="flex items-center justify-between">
             <h3 className="text-xs font-semibold text-white/60 flex items-center gap-1.5 uppercase tracking-wider">
-              <Type className="w-3.5 h-3.5" /> 图文覆盖
+              <Type className="w-3.5 h-3.5" /> 动态字幕
             </h3>
             <button
               onClick={addTextElement}
