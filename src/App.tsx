@@ -2127,7 +2127,15 @@ const SettingsPanel = () => {
                           onChange={e => updateImageElement(imgElem.id, { scale: parseFloat(e.target.value) || 1 })}
                           className="w-16 h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-orange-500"
                         />
-                        <span className="text-[8px] text-white/40">{Math.round(imgElem.scale * 100)}%</span>
+                        <input
+                          type="number"
+                          min="10"
+                          max="300"
+                          value={Math.round(imgElem.scale * 100)}
+                          onChange={e => updateImageElement(imgElem.id, { scale: (parseFloat(e.target.value) || 100) / 100 })}
+                          className="w-10 bg-zinc-800 rounded px-1 text-[10px] text-white outline-none text-right"
+                        />
+                        <span className="text-[10px] text-white/40">%</span>
                       </div>
                     </div>
                   </div>
