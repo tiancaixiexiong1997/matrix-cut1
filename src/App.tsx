@@ -91,6 +91,10 @@ export type TextElement = {
 
 export type GlobalSettings = {
   texts: TextElement[];
+  antiDupConfig: {
+    enabled: boolean;
+    intensity: 'light' | 'medium' | 'heavy';
+  };
 };
 
 export type ExportStatus = 'idle' | 'processing' | 'done' | 'error';
@@ -157,7 +161,11 @@ export const useStore = create<MatrixStore>((set) => ({
         pos: { x: 0, y: 0 },
         style: { fontFamily: 'SimHei, Heiti SC, sans-serif', fontSize: 32, color: '#ffffff', shadowColor: '#000000', shadowOpacity: 0.9, shadowBlur: 15, shadowDistance: 5, shadowAngle: -45 }
       }
-    ]
+    ],
+    antiDupConfig: {
+      enabled: false,
+      intensity: 'light'
+    }
   },
   customFonts: [],
   exports: [],
@@ -523,9 +531,39 @@ export const performExport = async (store: MatrixStore, quantity: number = 1) =>
       const bgmInputIndex = inputs.length; // BGM input 的 index（最后一个）
 
       inputs.forEach((input, index) => {
-        // 原视频降噪，使用 videoVolume
-        filterComplex += `[${index}:v]trim=0:${input.duration},setpts=PTS-STARTPTS,scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2[v${index}]; `;
-        filterComplex += `[${index}:a]atrim=0:${input.duration},asetpts=PTS-STARTPTS,volume=${bgm.videoVolume}[a${index}]; `;
+        let vFilter = `[${index}:v]trim=0:${input.duration},setpts=PTS-STARTPTS`;
+        let aFilter = `[${index}:a]atrim=0:${input.duration},asetpts=PTS-STARTPTS,volume=${bgm.videoVolume}`;
+
+        if (settings.antiDupConfig?.enabled) {
+          const intensity = settings.antiDupConfig.intensity;
+
+          // --- Light: Color Shift ---
+          const c = (1 + (Math.random() * 0.04 - 0.02)).toFixed(3); // 0.98~1.02
+          const b = (Math.random() * 0.04 - 0.02).toFixed(3);       // -0.02~0.02
+          const s = (1 + (Math.random() * 0.04 - 0.02)).toFixed(3); // 0.98~1.02
+          vFilter += `,eq=contrast=${c}:brightness=${b}:saturation=${s}`;
+
+          // --- Medium: Micro Zoom & Pan ---
+          if (intensity === 'medium' || intensity === 'heavy') {
+            const zoom = 1.015; // 1.5% zoom
+            const randX = Math.random().toFixed(3);
+            const randY = Math.random().toFixed(3);
+            vFilter += `,scale=${zoom}*iw:${zoom}*ih,crop=iw/${zoom}:ih/${zoom}:x='${randX}*(iw-ow)':y='${randY}*(ih-oh)'`;
+          }
+
+          // --- Heavy: Tempo & Pitch Shift ---
+          if (intensity === 'heavy') {
+            const speed = (1 + (Math.random() * 0.04 - 0.02)).toFixed(3); // 0.98~1.02
+            vFilter += `,setpts=PTS/${speed}`;
+            aFilter += `,atempo=${speed}`;
+          }
+        }
+
+        // Apply final scaling and padding to all videos uniformly
+        vFilter += `,scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2[v${index}]; `;
+        aFilter += `[a${index}]; `;
+
+        filterComplex += vFilter + aFilter;
         outSpecs.push(`[v${index}][a${index}]`);
       });
 
@@ -600,6 +638,10 @@ export const performExport = async (store: MatrixStore, quantity: number = 1) =>
       inputs.forEach(i => { ffmpegArgs.push('-i', i.filename); });
       if (hasBgm) ffmpegArgs.push('-i', bgmFilename);
       if (titleOverlayFilename) ffmpegArgs.push('-i', titleOverlayFilename);
+
+      if (settings.antiDupConfig?.enabled) {
+        ffmpegArgs.push('-map_metadata', '-1'); // Strip all metadata
+      }
 
       ffmpegArgs.push('-filter_complex', filterComplex);
       ffmpegArgs.push('-map', '[outv]');
@@ -1723,7 +1765,7 @@ const WorkspaceArea = () => {
 // 4. 右侧设置与导出 (Settings)
 // -------------------------
 const SettingsPanel = () => {
-  const { settings, exports, customFonts, addCustomFont, addTextElement, removeTextElement, updateTextElement } = useStore();
+  const { settings, exports, customFonts, updateSettings, addCustomFont, addTextElement, removeTextElement, updateTextElement } = useStore();
   const [isZipping, setIsZipping] = useState(false);
   const fontInputRef = React.useRef<HTMLInputElement>(null);
 
@@ -1943,6 +1985,69 @@ const SettingsPanel = () => {
               ))
             )}
           </div>
+        </GlassPanel>
+
+        {/* 深度隐形消重引擎 */}
+        <GlassPanel className="p-4 rounded-xl space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-xs font-semibold text-white/60 flex items-center gap-1.5 uppercase tracking-wider">
+              <Film className="w-3.5 h-3.5" /> 深度隐形消重引擎
+            </h3>
+            <label className="relative inline-flex items-center cursor-pointer">
+              <input
+                type="checkbox"
+                className="sr-only peer"
+                checked={settings.antiDupConfig?.enabled || false}
+                onChange={(e) => updateSettings({
+                  antiDupConfig: {
+                    ...(settings.antiDupConfig || { intensity: 'light' }),
+                    enabled: e.target.checked
+                  }
+                })}
+              />
+              <div className="w-9 h-5 bg-white/10 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-orange-500"></div>
+            </label>
+          </div>
+
+          {settings.antiDupConfig?.enabled && (
+            <div className="space-y-3 pt-2 border-t border-white/5">
+              <p className="text-[10px] text-white/40 leading-relaxed">
+                引擎会在后台针对导出片段应用肉眼极难察觉的像素扰动与底层参数重构，以规避机器特征查重。
+              </p>
+
+              <div className="space-y-2">
+                <span className="text-[10px] font-medium text-white/50">消重强度分级：</span>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => updateSettings({ antiDupConfig: { ...settings.antiDupConfig, intensity: 'light' } })}
+                    className={`flex-1 py-1.5 text-xs rounded border transition ${settings.antiDupConfig.intensity === 'light' ? 'bg-orange-500/20 text-orange-400 border-orange-500/50' : 'bg-black/40 text-white/60 border-white/10 hover:bg-white/5'}`}
+                  >
+                    轻度
+                  </button>
+                  <button
+                    onClick={() => updateSettings({ antiDupConfig: { ...settings.antiDupConfig, intensity: 'medium' } })}
+                    className={`flex-1 py-1.5 text-xs rounded border transition ${settings.antiDupConfig.intensity === 'medium' ? 'bg-orange-500/20 text-orange-400 border-orange-500/50' : 'bg-black/40 text-white/60 border-white/10 hover:bg-white/5'}`}
+                  >
+                    中度
+                  </button>
+                  <button
+                    onClick={() => updateSettings({ antiDupConfig: { ...settings.antiDupConfig, intensity: 'heavy' } })}
+                    className={`flex-1 py-1.5 text-xs rounded border transition ${settings.antiDupConfig.intensity === 'heavy' ? 'bg-orange-500/20 text-orange-400 border-orange-500/50' : 'bg-black/40 text-white/60 border-white/10 hover:bg-white/5'}`}
+                  >
+                    残暴
+                  </button>
+                </div>
+
+                <div className="bg-black/40 border border-white/5 rounded p-2 mt-2">
+                  <span className="text-[10px] text-white/40 leading-tight">
+                    {settings.antiDupConfig.intensity === 'light' && '轻度：随机微调三色平衡，底层重编码去元数据。适合高质微幅二创。'}
+                    {settings.antiDupConfig.intensity === 'medium' && '中度：含轻度效果，附加极度轻微(1~2%)的呼吸放大与随机画面位移截取。'}
+                    {settings.antiDupConfig.intensity === 'heavy' && '残暴：含中度效果，附加毫秒级的时间轴随机伸缩微调，彻底撕裂音频波形与关键帧时间戳比对。'}
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
         </GlassPanel>
 
 
