@@ -167,14 +167,7 @@ export const useStore = create<MatrixStore>((set) => ({
   timeline: [],
   bgm: { files: [], bgmVolume: 0.5, videoVolume: 1.0 },
   settings: {
-    texts: [
-      {
-        id: 'default-text-' + Date.now(),
-        text: '新字幕内容',
-        pos: { x: 0, y: 0 },
-        style: { fontFamily: 'SimHei, Heiti SC, sans-serif', fontSize: 32, color: '#ffffff', shadowColor: '#000000', shadowOpacity: 0.9, shadowBlur: 15, shadowDistance: 5, shadowAngle: -45 }
-      }
-    ],
+    texts: [],
     images: [],
     antiDupConfig: {
       enabled: false,
