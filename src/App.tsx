@@ -473,284 +473,337 @@ export const cancelExport = () => { exportCancelSignal = true; };
 
 export const performExport = async (store: MatrixStore, quantity: number = 1) => {
   exportCancelSignal = false; // 每次开始导出重置状态
-  const { pools, timeline, bgm, settings, addExportTask, updateExportTask } = store;
+  const { timeline, addExportTask, updateExportTask } = store;
 
   if (timeline.length === 0) {
     alert("时间轴为空，无法导出！");
     return;
   }
 
-  const totalExportDuration = timeline.reduce((acc, seg) => acc + seg.duration, 0);
+  // 硬件并发量 - 1 留给主 UI 线程，最小为 1，最大限制在 4 防爆内存
+  const maxWorkers = navigator.hardwareConcurrency
+    ? Math.max(1, Math.min(navigator.hardwareConcurrency - 1, 4))
+    : 2;
 
-  // 顺序执行队列以防 FFmpeg 内存崩溃
+  console.log(`Starting export pool with max concurrency: ${maxWorkers}`);
+
+  const taskQueue: string[] = [];
+
+  // 前期初始化所有任务 ID 并压入 UI 列表
   for (let q = 0; q < quantity; q++) {
-    // 如果用户点击了停止按鈕，跳出循环
-    if (exportCancelSignal) break;
-    // 1. 初始化任务
     const taskId = uuidv4();
-    // 格式化当前时间为 "20260222_230809" 形式
     const now = new Date();
     const pad = (n: number) => String(n).padStart(2, '0');
-    const createdAt = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+    const createdAt = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}_${pad(q)}`;
     addExportTask({
       id: taskId,
-      status: 'processing',
+      status: 'idle', // 初始状态为 idle 等待入池
       progress: 0,
       resultUrl: null,
       createdAt,
     });
+    taskQueue.push(taskId);
+  }
 
-    try {
-      const ff = await getFFmpeg();
+  // 消费队列并发控制逻辑
+  let runningWorkers = 0;
+  let currentIndex = 0;
 
-      // 清理上一次的日志监听器，防止多开叠层
-      ff.off('log', () => { });
-      ff.off('progress', () => { });
-
-      // 监听 ffmpeg 日志以便排查卡死问题，并手动计算 progress (防止 WASM 不派发 progress 事件)
-      ff.on('log', ({ message }) => {
-        const timeMatch = message.match(/time=(\d{2}):(\d{2}):(\d{2}\.\d{2})/);
-        if (timeMatch) {
-          const hours = parseInt(timeMatch[1], 10);
-          const minutes = parseInt(timeMatch[2], 10);
-          const seconds = parseFloat(timeMatch[3]);
-          const currentSeconds = hours * 3600 + minutes * 60 + seconds;
-          let progress = currentSeconds / totalExportDuration;
-          updateExportTask(taskId, { progress: Math.min(Math.max(progress, 0), 0.99) });
+  return new Promise<void>((resolve) => {
+    const runNext = async () => {
+      if (exportCancelSignal) {
+        // Mark remaining tasks as error due to cancellation
+        while (currentIndex < taskQueue.length) {
+          updateExportTask(taskQueue[currentIndex++], { status: 'error', errorMessage: 'Export cancelled' });
         }
-      });
-
-      // 备用兜底 progress
-      ff.on('progress', ({ progress }) => {
-        if (progress > 0) {
-          updateExportTask(taskId, { progress: Math.min(Math.max(progress, 0), 0.99) });
-        }
-      });
-
-      // 2. 解析 Timeline，准备选材 (The Compiler)
-      const inputs: { filename: string; file: File; duration: number }[] = [];
-
-      for (let i = 0; i < timeline.length; i++) {
-        const seg = timeline[i];
-        const pool = pools.find(p => p.id === seg.poolId);
-        if (!pool || pool.files.length === 0) {
-          throw new Error(`轨道第 ${i + 1} 段 (所属池: ${pool?.name || seg.poolId}) 中没有可用素材！`);
-        }
-
-        // 此处为简化，随机从该池内抽取一个视频
-        const randFile = pool.files[Math.floor(Math.random() * pool.files.length)];
-
-        const inputName = `input_${i}_${randFile.name.replace(/[^a-zA-Z0-9.]/g, '')}`; // 规范化文件名用于 ffmpeg
-        inputs.push({
-          filename: inputName,
-          file: randFile.file,
-          duration: seg.duration
-        });
       }
 
-      // 3. 写入内存文件系统 (MEMFS)
-      for (const input of inputs) {
-        await ff.writeFile(input.filename, await fetchFile(input.file));
+      if (currentIndex >= taskQueue.length) {
+        if (runningWorkers === 0) resolve();
+        return;
       }
 
+      if (runningWorkers >= maxWorkers) return;
 
-      // 4. 构建 filter_complex 指令
-      // 我们需要把每段切片，缩放/裁剪并重新校准时间戳
-      let filterComplex = '';
-      const outSpecs: string[] = [];
+      const idx = currentIndex++;
+      runningWorkers++;
+      const taskId = taskQueue[idx];
 
-      // 判断是否启用了 BGM
-      const hasBgm = bgm.files.length > 0;
-      // 随机选取一首 BGM
-      let bgmFilename = '';
-      if (hasBgm) {
-        const bgmFile = bgm.files[Math.floor(Math.random() * bgm.files.length)];
-        bgmFilename = `bgm_${bgmFile.name.replace(/[^a-zA-Z0-9.]/g, '')}`;
-        await ff.writeFile(bgmFilename, await fetchFile(bgmFile.file));
+      try {
+        await runSingleFfmpegTask(taskId, store);
+      } catch (err: any) {
+        console.error(`Task ${taskId} execution failed`, err);
+      } finally {
+        runningWorkers--;
+        runNext(); // trigger the next worker slot
+      }
+    };
+
+    // Kick off initial workers
+    for (let i = 0; i < maxWorkers; i++) {
+      runNext();
+    }
+  });
+};
+
+const runSingleFfmpegTask = async (taskId: string, store: MatrixStore) => {
+  const { pools, timeline, bgm, settings, updateExportTask } = store;
+
+  updateExportTask(taskId, { status: 'processing', progress: 0 });
+
+  const totalExportDuration = timeline.reduce((acc, seg) => acc + seg.duration, 0);
+
+  const ff = new FFmpeg();
+
+  try {
+    await ff.load({ coreURL, wasmURL });
+
+    // 监听独立实例的 progress //
+    ff.on('log', ({ message }) => {
+      const timeMatch = message.match(/time=(\d{2}):(\d{2}):(\d{2}\.\d{2})/);
+      if (timeMatch) {
+        const hours = parseInt(timeMatch[1], 10);
+        const minutes = parseInt(timeMatch[2], 10);
+        const seconds = parseFloat(timeMatch[3]);
+        const currentSeconds = hours * 3600 + minutes * 60 + seconds;
+        let progress = currentSeconds / totalExportDuration;
+        updateExportTask(taskId, { progress: Math.min(Math.max(progress, 0), 0.99) });
+      }
+    });
+
+    ff.on('progress', ({ progress }) => {
+      if (progress > 0) {
+        updateExportTask(taskId, { progress: Math.min(Math.max(progress, 0), 0.99) });
+      }
+    });
+
+    // 2. 解析 Timeline，准备选材 (The Compiler)
+    const inputs: { filename: string; file: File; duration: number }[] = [];
+
+    for (let i = 0; i < timeline.length; i++) {
+      const seg = timeline[i];
+      const pool = pools.find(p => p.id === seg.poolId);
+      if (!pool || pool.files.length === 0) {
+        throw new Error(`轨道第 ${i + 1} 段 (所属池: ${pool?.name || seg.poolId}) 中没有可用素材！`);
       }
 
-      const bgmInputIndex = inputs.length; // BGM input 的 index（最后一个）
+      // 此处为简化，随机从该池内抽取一个视频
+      const randFile = pool.files[Math.floor(Math.random() * pool.files.length)];
 
-      inputs.forEach((input, index) => {
-        let vFilter = `[${index}:v]trim=0:${input.duration},setpts=PTS-STARTPTS`;
-        let aFilter = `[${index}:a]atrim=0:${input.duration},asetpts=PTS-STARTPTS,volume=${bgm.videoVolume}`;
+      const inputName = `input_${i}_${randFile.name.replace(/[^a-zA-Z0-9.]/g, '')}`; // 规范化文件名用于 ffmpeg
+      inputs.push({
+        filename: inputName,
+        file: randFile.file,
+        duration: seg.duration
+      });
+    }
 
-        if (settings.antiDupConfig?.enabled) {
-          const intensity = settings.antiDupConfig.intensity;
+    // 3. 写入内存文件系统 (MEMFS)
+    for (const input of inputs) {
+      await ff.writeFile(input.filename, await fetchFile(input.file));
+    }
 
-          // --- Light: Color Shift ---
-          const c = (1 + (Math.random() * 0.04 - 0.02)).toFixed(3); // 0.98~1.02
-          const b = (Math.random() * 0.04 - 0.02).toFixed(3);       // -0.02~0.02
-          const s = (1 + (Math.random() * 0.04 - 0.02)).toFixed(3); // 0.98~1.02
-          vFilter += `,eq=contrast=${c}:brightness=${b}:saturation=${s}`;
 
-          // --- Medium: Micro Zoom & Pan ---
-          if (intensity === 'medium' || intensity === 'heavy') {
-            const zoom = 1.015; // 1.5% zoom
-            const randX = Math.random().toFixed(3);
-            const randY = Math.random().toFixed(3);
-            vFilter += `,scale=${zoom}*iw:${zoom}*ih,crop=iw/${zoom}:ih/${zoom}:x='${randX}*(iw-ow)':y='${randY}*(ih-oh)'`;
-          }
+    // 4. 构建 filter_complex 指令
+    // 我们需要把每段切片，缩放/裁剪并重新校准时间戳
+    let filterComplex = '';
+    const outSpecs: string[] = [];
 
-          // --- Heavy: Tempo & Pitch Shift ---
-          if (intensity === 'heavy') {
-            const speed = (1 + (Math.random() * 0.04 - 0.02)).toFixed(3); // 0.98~1.02
-            vFilter += `,setpts=PTS/${speed}`;
-            aFilter += `,atempo=${speed}`;
-          }
+    // 判断是否启用了 BGM
+    const hasBgm = bgm.files.length > 0;
+    // 随机选取一首 BGM
+    let bgmFilename = '';
+    if (hasBgm) {
+      const bgmFile = bgm.files[Math.floor(Math.random() * bgm.files.length)];
+      bgmFilename = `bgm_${bgmFile.name.replace(/[^a-zA-Z0-9.]/g, '')}`;
+      await ff.writeFile(bgmFilename, await fetchFile(bgmFile.file));
+    }
+
+    const bgmInputIndex = inputs.length; // BGM input 的 index（最后一个）
+
+    inputs.forEach((input, index) => {
+      let vFilter = `[${index}:v]trim=0:${input.duration},setpts=PTS-STARTPTS`;
+      let aFilter = `[${index}:a]atrim=0:${input.duration},asetpts=PTS-STARTPTS,volume=${bgm.videoVolume}`;
+
+      if (settings.antiDupConfig?.enabled) {
+        const intensity = settings.antiDupConfig.intensity;
+
+        // --- Light: Color Shift ---
+        const c = (1 + (Math.random() * 0.04 - 0.02)).toFixed(3); // 0.98~1.02
+        const b = (Math.random() * 0.04 - 0.02).toFixed(3);       // -0.02~0.02
+        const s = (1 + (Math.random() * 0.04 - 0.02)).toFixed(3); // 0.98~1.02
+        vFilter += `,eq=contrast=${c}:brightness=${b}:saturation=${s}`;
+
+        // --- Medium: Micro Zoom & Pan ---
+        if (intensity === 'medium' || intensity === 'heavy') {
+          const zoom = 1.015; // 1.5% zoom
+          const randX = Math.random().toFixed(3);
+          const randY = Math.random().toFixed(3);
+          vFilter += `,scale=${zoom}*iw:${zoom}*ih,crop=iw/${zoom}:ih/${zoom}:x='${randX}*(iw-ow)':y='${randY}*(ih-oh)'`;
         }
 
-        // Apply final scaling and padding to all videos uniformly
-        vFilter += `,scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2[v${index}]; `;
-        aFilter += `[a${index}]; `;
+        // --- Heavy: Tempo & Pitch Shift ---
+        if (intensity === 'heavy') {
+          const speed = (1 + (Math.random() * 0.04 - 0.02)).toFixed(3); // 0.98~1.02
+          vFilter += `,setpts=PTS/${speed}`;
+          aFilter += `,atempo=${speed}`;
+        }
+      }
 
-        filterComplex += vFilter + aFilter;
-        outSpecs.push(`[v${index}][a${index}]`);
+      // Apply final scaling and padding to all videos uniformly
+      vFilter += `,scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2[v${index}]; `;
+      aFilter += `[a${index}]; `;
+
+      filterComplex += vFilter + aFilter;
+      outSpecs.push(`[v${index}][a${index}]`);
+    });
+
+    // 拼接最终连片: concat 所有视频+音频
+    filterComplex += `${outSpecs.join('')}concat=n=${inputs.length}:v=1:a=1[outv_concat][outa_raw]; `;
+
+    // ── Canvas 文字叠加（取代 drawtext，100% 兼容中文和特殊字符）──
+    const OW = 1080, OH = 1920;
+    const scaleM = OH / 600;
+    let titleOverlayFilename = '';
+    const hasAnyTitle = settings.texts && settings.texts.length > 0 && settings.texts.some(t => t.text.trim() !== '');
+
+    if (hasAnyTitle) {
+      const cvs = document.createElement('canvas');
+      cvs.width = OW; cvs.height = OH;
+      const ctx = cvs.getContext('2d')!;
+      ctx.clearRect(0, 0, OW, OH);
+
+      const drawCanvasText = (text: string, style: TextStyle, pos: { x: number; y: number }) => {
+        if (!text || !text.trim()) return;
+        ctx.save();
+        const sr = parseInt(style.shadowColor.slice(1, 3), 16);
+        const sg = parseInt(style.shadowColor.slice(3, 5), 16);
+        const sb = parseInt(style.shadowColor.slice(5, 7), 16);
+        ctx.shadowColor = `rgba(${sr},${sg},${sb},${style.shadowOpacity})`;
+        ctx.shadowBlur = style.shadowBlur * scaleM;
+        ctx.shadowOffsetX = style.shadowDistance * Math.cos(style.shadowAngle * Math.PI / 180) * scaleM;
+        ctx.shadowOffsetY = style.shadowDistance * -Math.sin(style.shadowAngle * Math.PI / 180) * scaleM;
+        ctx.font = `bold ${Math.round(style.fontSize * scaleM)}px "${style.fontFamily}"`;
+        ctx.fillStyle = style.color;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(text, OW / 2 + pos.x * scaleM, OH / 2 + pos.y * scaleM);
+        ctx.restore();
+      };
+
+      settings.texts.forEach(t => {
+        drawCanvasText(t.text, t.style, t.pos);
       });
 
-      // 拼接最终连片: concat 所有视频+音频
-      filterComplex += `${outSpecs.join('')}concat=n=${inputs.length}:v=1:a=1[outv_concat][outa_raw]; `;
+      const pngBytes = await new Promise<Uint8Array>((resolve) => {
+        cvs.toBlob(async (blob) => {
+          if (!blob) { resolve(new Uint8Array()); return; }
+          resolve(new Uint8Array(await blob.arrayBuffer()));
+        }, 'image/png');
+      });
 
-      // ── Canvas 文字叠加（取代 drawtext，100% 兼容中文和特殊字符）──
-      const OW = 1080, OH = 1920;
-      const scaleM = OH / 600;
-      let titleOverlayFilename = '';
-      const hasAnyTitle = settings.texts && settings.texts.length > 0 && settings.texts.some(t => t.text.trim() !== '');
-
-      if (hasAnyTitle) {
-        const cvs = document.createElement('canvas');
-        cvs.width = OW; cvs.height = OH;
-        const ctx = cvs.getContext('2d')!;
-        ctx.clearRect(0, 0, OW, OH);
-
-        const drawCanvasText = (text: string, style: TextStyle, pos: { x: number; y: number }) => {
-          if (!text || !text.trim()) return;
-          ctx.save();
-          const sr = parseInt(style.shadowColor.slice(1, 3), 16);
-          const sg = parseInt(style.shadowColor.slice(3, 5), 16);
-          const sb = parseInt(style.shadowColor.slice(5, 7), 16);
-          ctx.shadowColor = `rgba(${sr},${sg},${sb},${style.shadowOpacity})`;
-          ctx.shadowBlur = style.shadowBlur * scaleM;
-          ctx.shadowOffsetX = style.shadowDistance * Math.cos(style.shadowAngle * Math.PI / 180) * scaleM;
-          ctx.shadowOffsetY = style.shadowDistance * -Math.sin(style.shadowAngle * Math.PI / 180) * scaleM;
-          ctx.font = `bold ${Math.round(style.fontSize * scaleM)}px "${style.fontFamily}"`;
-          ctx.fillStyle = style.color;
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          ctx.fillText(text, OW / 2 + pos.x * scaleM, OH / 2 + pos.y * scaleM);
-          ctx.restore();
-        };
-
-        settings.texts.forEach(t => {
-          drawCanvasText(t.text, t.style, t.pos);
-        });
-
-        const pngBytes = await new Promise<Uint8Array>((resolve) => {
-          cvs.toBlob(async (blob) => {
-            if (!blob) { resolve(new Uint8Array()); return; }
-            resolve(new Uint8Array(await blob.arrayBuffer()));
-          }, 'image/png');
-        });
-
-        if (pngBytes.length > 0) {
-          titleOverlayFilename = 'title_overlay.png';
-          await ff.writeFile(titleOverlayFilename, pngBytes);
-          const overlayIdx = inputs.length + (hasBgm ? 1 : 0);
-          filterComplex += `[outv_concat][${overlayIdx}:v]overlay=0:0[outv_texts]; `;
-        } else {
-          filterComplex += `[outv_concat]copy[outv_texts]; `;
-        }
+      if (pngBytes.length > 0) {
+        titleOverlayFilename = 'title_overlay.png';
+        await ff.writeFile(titleOverlayFilename, pngBytes);
+        const overlayIdx = inputs.length + (hasBgm ? 1 : 0);
+        filterComplex += `[outv_concat][${overlayIdx}:v]overlay=0:0[outv_texts]; `;
       } else {
         filterComplex += `[outv_concat]copy[outv_texts]; `;
       }
+    } else {
+      filterComplex += `[outv_concat]copy[outv_texts]; `;
+    }
 
-      // ── 图片贴纸叠加 ──
-      const imageFilenames: string[] = [];
-      const hasImages = settings.images && settings.images.length > 0;
+    // ── 图片贴纸叠加 ──
+    const imageFilenames: string[] = [];
+    const hasImages = settings.images && settings.images.length > 0;
 
-      if (hasImages) {
-        let lastImageOut = 'outv_texts';
-        for (let i = 0; i < settings.images.length; i++) {
-          const imgElem = settings.images[i];
-          const imgExt = imgElem.file.name.split('.').pop() || 'png';
-          const imgName = `custom_img_${i}.${imgExt}`;
-          await ff.writeFile(imgName, await fetchFile(imgElem.file));
-          imageFilenames.push(imgName);
+    if (hasImages) {
+      let lastImageOut = 'outv_texts';
+      for (let i = 0; i < settings.images.length; i++) {
+        const imgElem = settings.images[i];
+        const imgExt = imgElem.file.name.split('.').pop() || 'png';
+        const imgName = `custom_img_${i}.${imgExt}`;
+        await ff.writeFile(imgName, await fetchFile(imgElem.file));
+        imageFilenames.push(imgName);
 
-          const imgInputIdx = inputs.length + (hasBgm ? 1 : 0) + (titleOverlayFilename ? 1 : 0) + i;
-          const nextOut = i === settings.images.length - 1 ? 'outv' : `outv_img_${i}`;
+        const imgInputIdx = inputs.length + (hasBgm ? 1 : 0) + (titleOverlayFilename ? 1 : 0) + i;
+        const nextOut = i === settings.images.length - 1 ? 'outv' : `outv_img_${i}`;
 
-          // x=W/2 + pos.x - w/2  => 将锚点置于贴图中心，并支持 scale
-          filterComplex += `[${imgInputIdx}:v]scale=iw*${imgElem.scale}:ih*${imgElem.scale}[scaled_img_${i}]; `;
-          filterComplex += `[${lastImageOut}][scaled_img_${i}]overlay=(W-w)/2+${imgElem.pos.x * scaleM}:(H-h)/2+${imgElem.pos.y * scaleM}[${nextOut}]; `;
-          lastImageOut = nextOut;
-        }
-      } else {
-        filterComplex += `[outv_texts]copy[outv]; `;
+        // x=W/2 + pos.x - w/2  => 将锚点置于贴图中心，并支持 scale
+        filterComplex += `[${imgInputIdx}:v]scale=iw*${imgElem.scale}:ih*${imgElem.scale}[scaled_img_${i}]; `;
+        filterComplex += `[${lastImageOut}][scaled_img_${i}]overlay=(W-w)/2+${imgElem.pos.x * scaleM}:(H-h)/2+${imgElem.pos.y * scaleM}[${nextOut}]; `;
+        lastImageOut = nextOut;
       }
+    } else {
+      filterComplex += `[outv_texts]copy[outv]; `;
+    }
 
-      if (hasBgm) {
-        // BGM 裁剪到总时长 + 调节音量
-        filterComplex += `[${bgmInputIndex}:a]atrim=0:${totalExportDuration},asetpts=PTS-STARTPTS,volume=${bgm.bgmVolume}[bgm_trimmed]; `;
-        // amix 混合原音频和 BGM
-        filterComplex += `[outa_raw][bgm_trimmed]amix=inputs=2:duration=first:dropout_transition=0[outa]`;
-      } else {
-        // 无 BGM 直接重命名
-        filterComplex += `[outa_raw]acopy[outa]`;
-      }
+    if (hasBgm) {
+      // BGM 裁剪到总时长 + 调节音量
+      filterComplex += `[${bgmInputIndex}:a]atrim=0:${totalExportDuration},asetpts=PTS-STARTPTS,volume=${bgm.bgmVolume}[bgm_trimmed]; `;
+      // amix 混合原音频和 BGM
+      filterComplex += `[outa_raw][bgm_trimmed]amix=inputs=2:duration=first:dropout_transition=0[outa]`;
+    } else {
+      // 无 BGM 直接重命名
+      filterComplex += `[outa_raw]acopy[outa]`;
+    }
 
-      // 组装 -i 参数 (视频 + BGM + 文字叠层 + 图片叠层)
-      const ffmpegArgs: string[] = [];
-      inputs.forEach(i => { ffmpegArgs.push('-i', i.filename); });
-      if (hasBgm) ffmpegArgs.push('-i', bgmFilename);
-      if (titleOverlayFilename) ffmpegArgs.push('-i', titleOverlayFilename);
-      imageFilenames.forEach(img => { ffmpegArgs.push('-i', img); });
+    // 组装 -i 参数 (视频 + BGM + 文字叠层 + 图片叠层)
+    const ffmpegArgs: string[] = [];
+    inputs.forEach(i => { ffmpegArgs.push('-i', i.filename); });
+    if (hasBgm) ffmpegArgs.push('-i', bgmFilename);
+    if (titleOverlayFilename) ffmpegArgs.push('-i', titleOverlayFilename);
+    imageFilenames.forEach(img => { ffmpegArgs.push('-i', img); });
 
-      if (settings.antiDupConfig?.enabled) {
-        ffmpegArgs.push('-map_metadata', '-1'); // Strip all metadata
-      }
+    if (settings.antiDupConfig?.enabled) {
+      ffmpegArgs.push('-map_metadata', '-1'); // Strip all metadata
+    }
 
-      ffmpegArgs.push('-filter_complex', filterComplex);
-      ffmpegArgs.push('-map', '[outv]');
-      ffmpegArgs.push('-map', '[outa]');
-      ffmpegArgs.push('-c:v', 'libx264');
-      ffmpegArgs.push('-c:a', 'aac');
-      ffmpegArgs.push('-preset', 'ultrafast');
-      ffmpegArgs.push('-pix_fmt', 'yuv420p');
-      ffmpegArgs.push('output.mp4');
+    ffmpegArgs.push('-filter_complex', filterComplex);
+    ffmpegArgs.push('-map', '[outv]');
+    ffmpegArgs.push('-map', '[outa]');
+    ffmpegArgs.push('-c:v', 'libx264');
+    ffmpegArgs.push('-c:a', 'aac');
+    ffmpegArgs.push('-preset', 'ultrafast');
+    ffmpegArgs.push('-pix_fmt', 'yuv420p');
+    ffmpegArgs.push('output.mp4');
 
-      console.log("Executing FFmpeg with args:", ffmpegArgs);
+    console.log("Executing FFmpeg with args:", ffmpegArgs);
 
-      const retCode = await ff.exec(ffmpegArgs);
-      if (retCode !== 0) throw new Error(`FFmpeg 执行失败，退出码: ${retCode}`);
+    const retCode = await ff.exec(ffmpegArgs);
+    if (retCode !== 0) throw new Error(`FFmpeg 执行失败，退出码: ${retCode}`);
 
-      const outputData = await ff.readFile('output.mp4');
-      const blob = new Blob([outputData as any], { type: 'video/mp4' });
-      const resultUrl = URL.createObjectURL(blob);
+    const outputData = await ff.readFile('output.mp4');
+    const blob = new Blob([outputData as any], { type: 'video/mp4' });
+    const resultUrl = URL.createObjectURL(blob);
 
-      await ff.deleteFile('output.mp4');
-      for (const input of inputs) { await ff.deleteFile(input.filename); }
-      if (hasBgm && bgmFilename) { await ff.deleteFile(bgmFilename); }
-      if (titleOverlayFilename) { try { await ff.deleteFile(titleOverlayFilename); } catch (_) { } }
-      for (const imgName of imageFilenames) { try { await ff.deleteFile(imgName); } catch (_) { } }
+    await ff.deleteFile('output.mp4');
+    for (const input of inputs) { await ff.deleteFile(input.filename); }
+    if (hasBgm && bgmFilename) { await ff.deleteFile(bgmFilename); }
+    if (titleOverlayFilename) { try { await ff.deleteFile(titleOverlayFilename); } catch (_) { } }
+    for (const imgName of imageFilenames) { try { await ff.deleteFile(imgName); } catch (_) { } }
 
-      // 更新 UI 任务状态
-      updateExportTask(taskId, {
-        status: 'done',
-        progress: 1,
-        resultUrl
-      });
+    updateExportTask(taskId, {
+      status: 'done',
+      progress: 1,
+      resultUrl
+    });
 
-    } catch (err: any) {
-      console.error("FFmpeg Export Error: ", err);
+  } catch (err: any) {
+    if (exportCancelSignal) {
+      updateExportTask(taskId, { status: 'error', errorMessage: '已手动取消任务' });
+    } else {
+      console.error(`Task ${taskId} FFmpeg Export Error:`, err);
       updateExportTask(taskId, {
         status: 'error',
         errorMessage: err.message || '导出视频时发生未知错误',
       });
     }
+  } finally {
+    // ✅ 关键清理：直接释放独立实例底层 Worker 内容内存
   }
 };
-
 
 // -------------------------
 // BGM 音乐池面板 (BGM Panel)
