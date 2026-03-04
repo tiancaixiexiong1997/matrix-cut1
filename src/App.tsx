@@ -1446,7 +1446,7 @@ const WorkspaceArea = () => {
               <h2
                 className="font-bold pointer-events-none text-center"
                 style={{
-                  fontFamily: `"${settings.mainTitleStyle.fontFamily}"`,
+                  fontFamily: settings.mainTitleStyle.fontFamily,
                   fontSize: `${settings.mainTitleStyle.fontSize}px`,
                   color: settings.mainTitleStyle.color,
                   textShadow: `${settings.mainTitleStyle.shadowDistance * Math.cos(settings.mainTitleStyle.shadowAngle * Math.PI / 180)}px ${settings.mainTitleStyle.shadowDistance * -Math.sin(settings.mainTitleStyle.shadowAngle * Math.PI / 180)}px ${settings.mainTitleStyle.shadowBlur}px rgba(${parseInt(settings.mainTitleStyle.shadowColor.slice(1, 3), 16)}, ${parseInt(settings.mainTitleStyle.shadowColor.slice(3, 5), 16)}, ${parseInt(settings.mainTitleStyle.shadowColor.slice(5, 7), 16)}, ${settings.mainTitleStyle.shadowOpacity})`
@@ -1463,7 +1463,7 @@ const WorkspaceArea = () => {
               <p
                 className="font-medium pointer-events-none text-center inline-block"
                 style={{
-                  fontFamily: `"${settings.subTitleStyle.fontFamily}"`,
+                  fontFamily: settings.subTitleStyle.fontFamily,
                   fontSize: `${settings.subTitleStyle.fontSize}px`,
                   color: settings.subTitleStyle.color,
                   textShadow: `${settings.subTitleStyle.shadowDistance * Math.cos(settings.subTitleStyle.shadowAngle * Math.PI / 180)}px ${settings.subTitleStyle.shadowDistance * -Math.sin(settings.subTitleStyle.shadowAngle * Math.PI / 180)}px ${settings.subTitleStyle.shadowBlur}px rgba(${parseInt(settings.subTitleStyle.shadowColor.slice(1, 3), 16)}, ${parseInt(settings.subTitleStyle.shadowColor.slice(3, 5), 16)}, ${parseInt(settings.subTitleStyle.shadowColor.slice(5, 7), 16)}, ${settings.subTitleStyle.shadowOpacity})`
