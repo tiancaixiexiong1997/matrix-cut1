@@ -2284,7 +2284,9 @@ const SettingsPanel = () => {
                 <div key={exp.id} className="p-3 rounded-lg bg-zinc-900/80 border border-white/10 space-y-2">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-medium text-white/80">
-                      {exp.status === 'processing' ? '正在混剪合成...' : exp.status === 'done' ? '✅ 视频生成完毕' : '❌ 发生异常'}
+                      {exp.status === 'idle' ? '⏳ 等待排队中...' :
+                        exp.status === 'processing' ? '正在混剪合成...' :
+                          exp.status === 'done' ? '✅ 视频生成完毕' : '❌ 发生异常'}
                     </span>
                     <span className="text-xs font-mono text-orange-400">
                       {exp.status === 'processing' ? `${Math.floor(exp.progress * 100)}%` : ''}
