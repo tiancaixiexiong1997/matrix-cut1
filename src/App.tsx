@@ -226,9 +226,24 @@ export const useStore = create<MatrixStore>((set) => ({
       : p)
   })),
 
-  addTimelineSegment: (poolId, duration = 2.5) => set((state) => ({
-    timeline: [...state.timeline, { id: uuidv4(), poolId, duration }]
-  })),
+  addTimelineSegment: (poolId, customDuration) => set((state) => {
+    let finalDuration = customDuration || 2.5;
+
+    if (!customDuration) {
+      const pool = state.pools.find(p => p.id === poolId);
+      if (pool && pool.files.length > 0) {
+        // 过滤出已经抽出 duration (>0) 的视频，取其最小值
+        const validDurations = pool.files.map(f => f.duration).filter(d => d > 0);
+        if (validDurations.length > 0) {
+          finalDuration = Math.min(...validDurations);
+        }
+      }
+    }
+
+    return {
+      timeline: [...state.timeline, { id: uuidv4(), poolId, duration: finalDuration }]
+    };
+  }),
 
   updateTimelineSegment: (segId, updates) => set((state) => ({
     timeline: state.timeline.map(t => t.id === segId ? { ...t, ...updates } : t)
