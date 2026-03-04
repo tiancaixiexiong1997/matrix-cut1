@@ -1025,10 +1025,21 @@ const MaterialPoolPanel = () => {
       updatePoolName(poolId, folderName);
 
       // 2. 检查轨道里是否已经有这个池子的片段，没有则在最后追加一段默认结构
-      const currentTimeline = useStore.getState().timeline;
-      if (!currentTimeline.some(t => t.poolId === poolId)) {
-        useStore.getState().addTimelineSegment(poolId, 3.0);
-      }
+      // 使用快速的 metadata 异步读取来计算刚好这波文件中的最短时长
+      Promise.all(newVideoFiles.map(f => new Promise<number>(resolve => {
+        const v = document.createElement('video');
+        v.preload = 'metadata';
+        v.onloadedmetadata = () => resolve(v.duration);
+        v.onerror = () => resolve(9999);
+        v.src = f.url;
+      }))).then(durations => {
+        const currentTimeline = useStore.getState().timeline;
+        if (!currentTimeline.some(t => t.poolId === poolId)) {
+          const validDurations = durations.filter(d => d > 0 && d !== 9999);
+          const minDur = validDurations.length > 0 ? Math.min(...validDurations) : 2.5;
+          useStore.getState().addTimelineSegment(poolId, minDur);
+        }
+      });
 
       // 3. 顺便帮用户在下面补齐一个新的空素材池坑位（如果是往最后一个池子里传）
       const currentPools = useStore.getState().pools;
