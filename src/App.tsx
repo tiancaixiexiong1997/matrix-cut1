@@ -151,16 +151,10 @@ export const useStore = create<MatrixStore>((set) => ({
   settings: {
     texts: [
       {
-        id: 'default-main-' + Date.now(),
-        text: '为什么你做不出爆款？',
-        pos: { x: 0, y: -220 },
-        style: { fontFamily: 'serif', fontSize: 32, color: '#ffffff', shadowColor: '#000000', shadowOpacity: 0.9, shadowBlur: 15, shadowDistance: 5, shadowAngle: -45 }
-      },
-      {
-        id: 'default-sub-' + Date.now(),
-        text: '掌握这个黄金三秒法则',
-        pos: { x: 0, y: 220 },
-        style: { fontFamily: 'serif', fontSize: 24, color: '#fb923c', shadowColor: '#000000', shadowOpacity: 0.9, shadowBlur: 10, shadowDistance: 5, shadowAngle: -45 }
+        id: 'default-text-' + Date.now(),
+        text: '新字幕内容',
+        pos: { x: 0, y: 0 },
+        style: { fontFamily: 'SimHei, Heiti SC, sans-serif', fontSize: 32, color: '#ffffff', shadowColor: '#000000', shadowOpacity: 0.9, shadowBlur: 15, shadowDistance: 5, shadowAngle: -45 }
       }
     ]
   },
@@ -260,7 +254,7 @@ export const useStore = create<MatrixStore>((set) => ({
         id: 'text-' + Date.now().toString() + '-' + Math.random().toString(36).substr(2, 5),
         text: '新字幕内容',
         pos: { x: 0, y: 0 },
-        style: { fontFamily: 'serif', fontSize: 24, color: '#ffffff', shadowColor: '#000000', shadowOpacity: 0.9, shadowBlur: 10, shadowDistance: 5, shadowAngle: -45 }
+        style: { fontFamily: 'SimHei, Heiti SC, sans-serif', fontSize: 32, color: '#ffffff', shadowColor: '#000000', shadowOpacity: 0.9, shadowBlur: 10, shadowDistance: 5, shadowAngle: -45 }
       }]
     }
   })),
@@ -1825,8 +1819,14 @@ const SettingsPanel = () => {
                           className="w-24 bg-zinc-800 rounded px-1 text-[10px] text-white outline-none"
                         >
                           <option value="serif">宋体/Serif</option>
-                          <option value="sans-serif">黑体/Sans</option>
+                          <option value="sans-serif">无衬线/Sans</option>
                           <option value="monospace">等宽/Mono</option>
+                          <option value="SimHei, Heiti SC, sans-serif">默认黑体</option>
+                          <option value="'Microsoft YaHei', PingFang SC, sans-serif">雅黑/苹方</option>
+                          <option value="KaiTi, Kaiti SC, serif">楷体</option>
+                          <option value="FangSong, FangSong SC, serif">仿宋</option>
+                          <option value="cursive">手写签名字体/Cursive</option>
+                          <option value="fantasy">艺术强调体/Fantasy</option>
                           {customFonts.map(f => <option key={f.url} value={f.name}>{f.name}</option>)}
                         </select>
                         <input type="number" min="10" max="100" title="字号" value={textElem.style.fontSize} onChange={e => updateTextElement(textElem.id, { style: { ...textElem.style, fontSize: parseInt(e.target.value) || 24 } })} className="w-12 bg-zinc-800 rounded px-1 text-[10px] text-white outline-none" />
