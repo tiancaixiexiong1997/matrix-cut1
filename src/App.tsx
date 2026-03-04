@@ -1326,7 +1326,18 @@ const SortableSegment = ({
         >
           <select
             value={seg.poolId}
-            onChange={e => updateTimelineSegment(seg.id, { poolId: e.target.value })}
+            onChange={e => {
+              const newPoolId = e.target.value;
+              const targetPool = pools.find((p: any) => p.id === newPoolId);
+              let newDuration = seg.duration;
+              if (targetPool && targetPool.files.length > 0) {
+                const validDurations = targetPool.files.map((f: any) => f.duration).filter((d: number) => d > 0);
+                if (validDurations.length > 0) {
+                  newDuration = Math.min(...validDurations);
+                }
+              }
+              updateTimelineSegment(seg.id, { poolId: newPoolId, duration: newDuration });
+            }}
             className="bg-black/50 text-white/90 text-xs p-1 rounded border border-white/10 outline-none w-full"
           >
             {pools.map((p: any) => <option key={p.id} value={p.id}>{p.name}</option>)}
