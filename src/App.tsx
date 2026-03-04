@@ -71,6 +71,7 @@ export type BgmSettings = {
 };
 
 export type TextStyle = {
+  fontFamily: string;
   fontSize: number;
   color: string;
   shadowColor: string;
@@ -108,6 +109,10 @@ interface MatrixStore {
   exports: ExportTask[];
   ffmpegStatus: 'idle' | 'loading' | 'ready' | 'error';
 
+  // Fonts
+  customFonts: { name: string; url: string }[];
+  addCustomFont: (name: string, url: string) => void;
+
   // Actions
   addPool: () => void;
   removePool: (id: string) => void;
@@ -142,11 +147,16 @@ export const useStore = create<MatrixStore>((set) => ({
     subTitle: '掌握这个黄金三秒法则',
     mainTitlePos: { x: 0, y: -220 }, // 相对于中心的偏移
     subTitlePos: { x: 0, y: 220 },
-    mainTitleStyle: { fontSize: 32, color: '#ffffff', shadowColor: '#000000', shadowOpacity: 0.9, shadowBlur: 15, shadowDistance: 5, shadowAngle: -45 },
-    subTitleStyle: { fontSize: 24, color: '#fb923c', shadowColor: '#000000', shadowOpacity: 0.9, shadowBlur: 10, shadowDistance: 5, shadowAngle: -45 }
+    mainTitleStyle: { fontFamily: 'serif', fontSize: 32, color: '#ffffff', shadowColor: '#000000', shadowOpacity: 0.9, shadowBlur: 15, shadowDistance: 5, shadowAngle: -45 },
+    subTitleStyle: { fontFamily: 'serif', fontSize: 24, color: '#fb923c', shadowColor: '#000000', shadowOpacity: 0.9, shadowBlur: 10, shadowDistance: 5, shadowAngle: -45 }
   },
+  customFonts: [],
   exports: [],
   ffmpegStatus: 'idle',
+
+  addCustomFont: (name, url) => set((state) => ({
+    customFonts: [...state.customFonts, { name, url }]
+  })),
 
   addPool: () => set((state) => ({
     pools: [...state.pools, { id: uuidv4(), name: `新建素材池_${state.pools.length + 1}`, files: [] }]
@@ -511,7 +521,7 @@ export const performExport = async (store: MatrixStore, quantity: number = 1) =>
           ctx.shadowBlur = style.shadowBlur * scaleM;
           ctx.shadowOffsetX = style.shadowDistance * Math.cos(style.shadowAngle * Math.PI / 180) * scaleM;
           ctx.shadowOffsetY = style.shadowDistance * -Math.sin(style.shadowAngle * Math.PI / 180) * scaleM;
-          ctx.font = `bold ${Math.round(style.fontSize * scaleM)}px serif`;
+          ctx.font = `bold ${Math.round(style.fontSize * scaleM)}px "${style.fontFamily}"`;
           ctx.fillStyle = style.color;
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
@@ -1434,8 +1444,9 @@ const WorkspaceArea = () => {
           <DraggableOverlay
             text={
               <h2
-                className="font-bold font-serif pointer-events-none text-center"
+                className="font-bold pointer-events-none text-center"
                 style={{
+                  fontFamily: `"${settings.mainTitleStyle.fontFamily}"`,
                   fontSize: `${settings.mainTitleStyle.fontSize}px`,
                   color: settings.mainTitleStyle.color,
                   textShadow: `${settings.mainTitleStyle.shadowDistance * Math.cos(settings.mainTitleStyle.shadowAngle * Math.PI / 180)}px ${settings.mainTitleStyle.shadowDistance * -Math.sin(settings.mainTitleStyle.shadowAngle * Math.PI / 180)}px ${settings.mainTitleStyle.shadowBlur}px rgba(${parseInt(settings.mainTitleStyle.shadowColor.slice(1, 3), 16)}, ${parseInt(settings.mainTitleStyle.shadowColor.slice(3, 5), 16)}, ${parseInt(settings.mainTitleStyle.shadowColor.slice(5, 7), 16)}, ${settings.mainTitleStyle.shadowOpacity})`
@@ -1452,6 +1463,7 @@ const WorkspaceArea = () => {
               <p
                 className="font-medium pointer-events-none text-center inline-block"
                 style={{
+                  fontFamily: `"${settings.subTitleStyle.fontFamily}"`,
                   fontSize: `${settings.subTitleStyle.fontSize}px`,
                   color: settings.subTitleStyle.color,
                   textShadow: `${settings.subTitleStyle.shadowDistance * Math.cos(settings.subTitleStyle.shadowAngle * Math.PI / 180)}px ${settings.subTitleStyle.shadowDistance * -Math.sin(settings.subTitleStyle.shadowAngle * Math.PI / 180)}px ${settings.subTitleStyle.shadowBlur}px rgba(${parseInt(settings.subTitleStyle.shadowColor.slice(1, 3), 16)}, ${parseInt(settings.subTitleStyle.shadowColor.slice(3, 5), 16)}, ${parseInt(settings.subTitleStyle.shadowColor.slice(5, 7), 16)}, ${settings.subTitleStyle.shadowOpacity})`
@@ -1633,8 +1645,39 @@ const WorkspaceArea = () => {
 // 4. 右侧设置与导出 (Settings)
 // -------------------------
 const SettingsPanel = () => {
-  const { settings, exports, updateSettings } = useStore();
+  const { settings, exports, customFonts, updateSettings, addCustomFont } = useStore();
   const [isZipping, setIsZipping] = useState(false);
+  const fontInputRef = React.useRef<HTMLInputElement>(null);
+
+  const handleFontUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      // 1. 获取本地文件的 URL
+      const fontUrl = URL.createObjectURL(file);
+      // 2. 生成一个唯一字体名，去掉后缀保留基本名
+      const baseName = file.name.replace(/\.[^/.]+$/, "");
+      const fontFamilyName = `CustomFont_${Date.now()}_${baseName}`;
+
+      // 3. 使用 FontFace API 加载字体
+      const fontFace = new FontFace(fontFamilyName, `url(${fontUrl})`);
+      const loadedFace = await fontFace.load();
+
+      // 4. 将加载完成的字体添加到 document
+      document.fonts.add(loadedFace);
+
+      // 5. 将新字体存入全局 store
+      addCustomFont(baseName, fontFamilyName);
+
+      alert(`字体 "${baseName}" 已成功加载并可在设置中使用！`);
+    } catch (err) {
+      console.error('Font load error:', err);
+      alert('字体加载失败，请检查文件格式是否有效');
+    }
+
+    if (fontInputRef.current) fontInputRef.current.value = '';
+  };
 
   const handleDownloadZip = async () => {
     const doneExports = exports.filter(e => e.status === 'done' && e.resultUrl);
@@ -1675,6 +1718,39 @@ const SettingsPanel = () => {
 
       <div className="flex-1 overflow-y-auto p-4 space-y-6 custom-scrollbar">
 
+        {/* 字体管理 */}
+        <GlassPanel className="p-4 rounded-xl space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-xs font-semibold text-white/60 flex items-center gap-1.5 uppercase tracking-wider">
+              <Type className="w-3.5 h-3.5" /> 本地字体
+            </h3>
+            <button
+              onClick={() => fontInputRef.current?.click()}
+              className="text-xs bg-white/10 hover:bg-white/20 text-white px-2 py-1 rounded border border-white/10 transition flex items-center gap-1"
+            >
+              <Plus className="w-3 h-3" /> 添加字体
+            </button>
+            <input
+              type="file"
+              accept=".ttf,.otf,.woff,.woff2"
+              ref={fontInputRef}
+              onChange={handleFontUpload}
+              className="hidden"
+            />
+          </div>
+          {customFonts.length > 0 ? (
+            <div className="flex flex-wrap gap-2">
+              {customFonts.map(f => (
+                <div key={f.url} className="text-[10px] bg-black/40 border border-white/10 px-2 py-1 rounded text-white/80">
+                  {f.name}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-[10px] text-white/40">暂无自定义字体</div>
+          )}
+        </GlassPanel>
+
         {/* 文本覆盖 */}
         <GlassPanel className="p-4 rounded-xl space-y-4">
           <h3 className="text-xs font-semibold text-white/60 mb-2 flex items-center gap-1.5 uppercase tracking-wider">
@@ -1694,6 +1770,16 @@ const SettingsPanel = () => {
                 <div className="flex bg-black/40 border border-white/10 rounded px-2 py-1 items-center justify-between">
                   <span className="text-[10px] text-white/40">字形参数</span>
                   <div className="flex items-center gap-2">
+                    <select
+                      value={settings.mainTitleStyle.fontFamily}
+                      onChange={e => updateSettings({ mainTitleStyle: { ...settings.mainTitleStyle, fontFamily: e.target.value } })}
+                      className="w-24 bg-zinc-800 rounded px-1 text-[10px] text-white outline-none"
+                    >
+                      <option value="serif">宋体/Serif</option>
+                      <option value="sans-serif">黑体/Sans</option>
+                      <option value="monospace">等宽/Mono</option>
+                      {customFonts.map(f => <option key={f.url} value={f.url}>{f.name}</option>)}
+                    </select>
                     <input type="number" min="10" max="100" title="字号" value={settings.mainTitleStyle.fontSize} onChange={e => updateSettings({ mainTitleStyle: { ...settings.mainTitleStyle, fontSize: parseInt(e.target.value) || 32 } })} className="w-12 bg-zinc-800 rounded px-1 text-[10px] text-white outline-none" />
                     <input type="color" title="颜色" value={settings.mainTitleStyle.color} onChange={e => updateSettings({ mainTitleStyle: { ...settings.mainTitleStyle, color: e.target.value } })} className="w-6 h-4 bg-transparent cursor-pointer rounded-sm" />
                   </div>
@@ -1745,6 +1831,16 @@ const SettingsPanel = () => {
                 <div className="flex bg-black/40 border border-white/10 rounded px-2 py-1 items-center justify-between">
                   <span className="text-[10px] text-white/40">字形参数</span>
                   <div className="flex items-center gap-2">
+                    <select
+                      value={settings.subTitleStyle.fontFamily}
+                      onChange={e => updateSettings({ subTitleStyle: { ...settings.subTitleStyle, fontFamily: e.target.value } })}
+                      className="w-24 bg-zinc-800 rounded px-1 text-[10px] text-white outline-none"
+                    >
+                      <option value="serif">宋体/Serif</option>
+                      <option value="sans-serif">黑体/Sans</option>
+                      <option value="monospace">等宽/Mono</option>
+                      {customFonts.map(f => <option key={f.url} value={f.url}>{f.name}</option>)}
+                    </select>
                     <input type="number" min="10" max="100" title="字号" value={settings.subTitleStyle.fontSize} onChange={e => updateSettings({ subTitleStyle: { ...settings.subTitleStyle, fontSize: parseInt(e.target.value) || 24 } })} className="w-12 bg-zinc-800 rounded px-1 text-[10px] text-white outline-none" />
                     <input type="color" title="颜色" value={settings.subTitleStyle.color} onChange={e => updateSettings({ subTitleStyle: { ...settings.subTitleStyle, color: e.target.value } })} className="w-6 h-4 bg-transparent cursor-pointer rounded-sm" />
                   </div>
