@@ -28,6 +28,7 @@ import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile } from '@ffmpeg/util';
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
+import { set as idbSet, get as idbGet, del as idbDel } from 'idb-keyval';
 
 import coreURL from '@ffmpeg/core?url';
 import wasmURL from '@ffmpeg/core/wasm?url';
@@ -1314,6 +1315,64 @@ const WorkspaceArea = () => {
     getFFmpeg().catch(err => console.error('Silent preload of FFmpeg failed:', err));
   }, []);
 
+  // IndexedDB 数据持久化 (Draft System)
+  const [isDraftLoading, setIsDraftLoading] = useState(true);
+
+  React.useEffect(() => {
+    // 1. Initial Load from IndexedDB
+    idbGet('matrix_draft').then(draft => {
+      if (draft && draft.version === 1) {
+        // Restore Object URLs for files
+        const restoredPools = draft.pools.map((p: any) => ({
+          ...p,
+          files: p.files.map((f: any) => ({
+            ...f,
+            url: URL.createObjectURL(f.file), // Regenerate URL
+            thumbnail: f.thumbnail // Assuming thumbnail is base64
+          }))
+        }));
+
+        const restoredBgm = {
+          ...draft.bgm,
+          files: draft.bgm.files.map((f: any) => ({
+            ...f,
+            url: URL.createObjectURL(f.file)
+          }))
+        };
+
+        useStore.setState({
+          pools: restoredPools,
+          timeline: draft.timeline,
+          settings: draft.settings,
+          bgm: restoredBgm
+        });
+        console.log('Restored draft from IndexedDB');
+      }
+    }).catch(err => console.error('Draft load error:', err))
+      .finally(() => setIsDraftLoading(false));
+  }, []);
+
+  React.useEffect(() => {
+    // 2. Auto-save to IndexedDB (debounced bypass by using a timeout and cleaning it up)
+    if (isDraftLoading) return; // Don't overwrite draft while initially loading
+
+    const handler = setTimeout(() => {
+      const draft = {
+        version: 1,
+        pools,
+        timeline,
+        settings,
+        bgm
+      };
+      // idb-keyval natively supports storing File objects within objects
+      idbSet('matrix_draft', draft).catch(err => console.error('Draft save error:', err));
+    }, 1000); // 1s debounce
+
+    return () => clearTimeout(handler);
+  }, [pools, timeline, settings, bgm, isDraftLoading]);
+
+
+
   // Local state for inline editing
   const [editingSegId, setEditingSegId] = useState<string | null>(null);
 
@@ -1668,6 +1727,13 @@ const SettingsPanel = () => {
   const [isZipping, setIsZipping] = useState(false);
   const fontInputRef = React.useRef<HTMLInputElement>(null);
 
+  const handleClearDraft = async () => {
+    if (window.confirm("确定要清空本地草稿吗？此操作将丢失所有未导出的进度与上传素材的关联！")) {
+      await idbDel('matrix_draft');
+      window.location.reload();
+    }
+  };
+
   const handleFontUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -1743,12 +1809,20 @@ const SettingsPanel = () => {
             <h3 className="text-xs font-semibold text-white/60 flex items-center gap-1.5 uppercase tracking-wider">
               <Type className="w-3.5 h-3.5" /> 本地字体
             </h3>
-            <button
-              onClick={() => fontInputRef.current?.click()}
-              className="text-xs bg-white/10 hover:bg-white/20 text-white px-2 py-1 rounded border border-white/10 transition flex items-center gap-1"
-            >
-              <Plus className="w-3 h-3" /> 添加字体
-            </button>
+            <div className="flex gap-2">
+              <button
+                onClick={handleClearDraft}
+                className="text-[10px] bg-red-500/20 hover:bg-red-500/40 text-red-300 px-2 py-1 rounded border border-red-500/30 transition flex items-center"
+              >
+                清空草稿
+              </button>
+              <button
+                onClick={() => fontInputRef.current?.click()}
+                className="text-xs bg-white/10 hover:bg-white/20 text-white px-2 py-1 rounded border border-white/10 transition flex items-center gap-1"
+              >
+                <Plus className="w-3 h-3" /> 添加字体
+              </button>
+            </div>
             <input
               type="file"
               accept=".ttf,.otf,.woff,.woff2"
