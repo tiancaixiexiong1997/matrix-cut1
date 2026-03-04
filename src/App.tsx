@@ -2120,16 +2120,16 @@ const SettingsPanel = () => {
                         <span className="text-[8px] text-white/40">缩放大小:</span>
                         <input
                           type="range"
-                          min="0.1"
+                          min="0.01"
                           max="3"
-                          step="0.05"
+                          step="0.01"
                           value={imgElem.scale}
                           onChange={e => updateImageElement(imgElem.id, { scale: parseFloat(e.target.value) || 1 })}
                           className="w-16 h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-orange-500"
                         />
                         <input
                           type="number"
-                          min="10"
+                          min="1"
                           max="300"
                           value={Math.round(imgElem.scale * 100)}
                           onChange={e => updateImageElement(imgElem.id, { scale: (parseFloat(e.target.value) || 100) / 100 })}
