@@ -1293,8 +1293,7 @@ const SortableSegment = ({
             setEditingSegId(isEditing ? null : seg.id);
           }
         }}
-        style={{ width: `${Math.max(60, Math.floor(seg.duration * 32))}px` }}
-        className={`h-16 border flex flex-col justify-center px-2 hover:brightness-125 transition-all text-xs overflow-hidden cursor-pointer rounded relative
+        className={`w-28 h-16 border flex flex-col justify-center px-2 hover:brightness-125 transition-all text-xs overflow-hidden cursor-pointer rounded relative
           ${isSelected ? 'border-blue-400 ring-2 ring-blue-400/40 bg-blue-500/20' : isEditing ? 'border-orange-500 ring-2 ring-orange-500/30 ' + colorClasses : colorClasses}
           ${isDragging ? 'shadow-2xl shadow-orange-500/20 border-orange-500/50' : ''}`}
       >
