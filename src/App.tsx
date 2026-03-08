@@ -1873,7 +1873,7 @@ const WorkspaceArea = () => {
   };
 
   return (
-    <div className="flex-1 flex flex-col relative bg-[#050505]">
+    <div className="flex-1 flex flex-col relative bg-[#050505] min-w-0">
       {/* 预览器顶部 */}
       <div className="flex-1 flex items-center justify-center p-8 relative overflow-hidden">
         <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-96 h-96 bg-orange-500/10 blur-[100px] rounded-full" />
