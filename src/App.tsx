@@ -2021,7 +2021,7 @@ const WorkspaceArea = () => {
             </div>
 
             {/* 轨道主体：左标签 + 滚动区 */}
-            <div className="flex flex-1 overflow-hidden">
+            <div className="flex flex-1 overflow-hidden min-w-0">
               {/* 左侧轨道标签 */}
               <div className="w-20 shrink-0 flex flex-col border-r border-white/5 text-[10px] text-white/40 font-medium">
                 <div className="h-5 border-b border-white/5 flex items-center px-2 bg-white/[0.01]"></div>
@@ -2035,7 +2035,7 @@ const WorkspaceArea = () => {
               </div>
 
               {/* 右侧滚动时间轴 */}
-              <div className="flex-1 overflow-x-auto overflow-y-hidden custom-scrollbar">
+              <div className="flex-1 overflow-x-auto overflow-y-hidden custom-scrollbar min-w-0">
                 <div style={{ width: totalPx + 120 }} className="h-full flex flex-col">
 
                   {/* 时间尺 */}
