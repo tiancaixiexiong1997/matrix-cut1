@@ -1305,12 +1305,14 @@ const DraggableOverlay = ({
   children,
   pos,
   onPosChange,
-  className
+  className,
+  style
 }: {
   children: React.ReactNode;
   pos: { x: number; y: number };
   onPosChange: (pos: { x: number; y: number }) => void;
   className?: string;
+  style?: React.CSSProperties;
 }) => {
   const isDragging = React.useRef(false);
   const startMouse = React.useRef({ x: 0, y: 0 });
@@ -1340,8 +1342,8 @@ const DraggableOverlay = ({
 
   return (
     <div
-      className={`absolute cursor-move z-20 w-fit whitespace-nowrap px-4 py-2 hover:ring-2 hover:ring-orange-500/50 hover:bg-black/20 transition-colors rounded ${className}`}
-      style={{ left: '50%', top: '50%', transform: `translate(calc(-50% + ${pos.x}px), calc(-50% + ${pos.y}px))` }}
+      className={`absolute cursor-move z-20 w-fit whitespace-nowrap px-4 py-2 hover:ring-2 hover:ring-orange-500/50 hover:bg-black/20 transition-colors rounded ${className || ''}`}
+      style={{ left: '50%', top: '50%', transform: `translate(calc(-50% + ${pos.x}px), calc(-50% + ${pos.y}px))`, ...style }}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
@@ -1904,40 +1906,52 @@ const WorkspaceArea = () => {
 
           <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-black/20 z-10 pointer-events-none" />
 
-          {settings.texts && settings.texts.map(textElem => (
-            <DraggableOverlay
-              key={textElem.id}
-              pos={textElem.pos}
-              onPosChange={(pos) => updateTextElement(textElem.id, { pos })}
-            >
-              <p
-                className="font-bold pointer-events-none text-center"
-                style={{
-                  fontFamily: textElem.style.fontFamily,
-                  fontSize: `${textElem.style.fontSize}px`,
-                  color: textElem.style.color,
-                  textShadow: `${textElem.style.shadowDistance * Math.cos(textElem.style.shadowAngle * Math.PI / 180)}px ${textElem.style.shadowDistance * -Math.sin(textElem.style.shadowAngle * Math.PI / 180)}px ${textElem.style.shadowBlur}px rgba(${parseInt(textElem.style.shadowColor.slice(1, 3), 16)}, ${parseInt(textElem.style.shadowColor.slice(3, 5), 16)}, ${parseInt(textElem.style.shadowColor.slice(5, 7), 16)}, ${textElem.style.shadowOpacity})`
-                }}
+          {settings.texts && settings.texts.map(textElem => {
+            const start = textElem.startTime ?? 0;
+            const dur = (textElem.duration && textElem.duration > 0) ? textElem.duration : totalDuration;
+            const isVisible = currentTime >= start && currentTime <= start + dur;
+            return (
+              <DraggableOverlay
+                key={textElem.id}
+                pos={textElem.pos}
+                onPosChange={(pos) => updateTextElement(textElem.id, { pos })}
+                style={{ opacity: isVisible ? 1 : 0, transition: 'opacity 0.1s', pointerEvents: isVisible ? 'auto' : 'none' }}
               >
-                {textElem.text}
-              </p>
-            </DraggableOverlay>
-          ))}
+                <p
+                  className="font-bold pointer-events-none text-center"
+                  style={{
+                    fontFamily: textElem.style.fontFamily,
+                    fontSize: `${textElem.style.fontSize}px`,
+                    color: textElem.style.color,
+                    textShadow: `${textElem.style.shadowDistance * Math.cos(textElem.style.shadowAngle * Math.PI / 180)}px ${textElem.style.shadowDistance * -Math.sin(textElem.style.shadowAngle * Math.PI / 180)}px ${textElem.style.shadowBlur}px rgba(${parseInt(textElem.style.shadowColor.slice(1, 3), 16)}, ${parseInt(textElem.style.shadowColor.slice(3, 5), 16)}, ${parseInt(textElem.style.shadowColor.slice(5, 7), 16)}, ${textElem.style.shadowOpacity})`
+                  }}
+                >
+                  {textElem.text}
+                </p>
+              </DraggableOverlay>
+            );
+          })}
 
-          {settings.images && settings.images.map(imgElem => (
-            <DraggableOverlay
-              key={imgElem.id}
-              pos={imgElem.pos}
-              onPosChange={(pos) => updateImageElement(imgElem.id, { pos })}
-            >
-              <img
-                src={imgElem.url}
-                alt="overlay"
-                className="pointer-events-none select-none max-w-none origin-center"
-                style={{ transform: `scale(${imgElem.scale})` }}
-              />
-            </DraggableOverlay>
-          ))}
+          {settings.images && settings.images.map(imgElem => {
+            const start = imgElem.startTime ?? 0;
+            const dur = (imgElem.duration && imgElem.duration > 0) ? imgElem.duration : totalDuration;
+            const isVisible = currentTime >= start && currentTime <= start + dur;
+            return (
+              <DraggableOverlay
+                key={imgElem.id}
+                pos={imgElem.pos}
+                onPosChange={(pos) => updateImageElement(imgElem.id, { pos })}
+                style={{ opacity: isVisible ? 1 : 0, transition: 'opacity 0.1s', pointerEvents: isVisible ? 'auto' : 'none' }}
+              >
+                <img
+                  src={imgElem.url}
+                  alt="overlay"
+                  className="pointer-events-none select-none max-w-none origin-center"
+                  style={{ transform: `scale(${imgElem.scale})` }}
+                />
+              </DraggableOverlay>
+            );
+          })}
 
           <button
             onClick={() => {
