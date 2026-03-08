@@ -15,7 +15,6 @@ import {
   horizontalListSortingStrategy,
   useSortable,
 } from '@dnd-kit/sortable';
-import { CSS } from '@dnd-kit/utilities';
 import {
   Play, Pause, Plus, Trash2, FolderPlus, Download,
   Settings, Type, Film, Zap, Clock, FolderOpen, Music2,
@@ -89,6 +88,9 @@ export type TextElement = {
   text: string;
   pos: { x: number; y: number };
   style: TextStyle;
+  // NLE 轨道时向属性
+  startTime: number;  // 内容展示开始秒数（与视频总时间对齐）
+  duration: number;   // 持续时长，0 = 跳过
 };
 
 export type ImageElement = {
@@ -97,6 +99,9 @@ export type ImageElement = {
   url: string; // ObjectURL for preview
   pos: { x: number; y: number };
   scale: number;
+  // NLE 轨道时向属性
+  startTime: number;
+  duration: number;
 };
 
 export type GlobalSettings = {
@@ -287,7 +292,10 @@ export const useStore = create<MatrixStore>((set) => ({
         id: 'text-' + Date.now().toString() + '-' + Math.random().toString(36).substr(2, 5),
         text: '新字幕内容',
         pos: { x: 0, y: 0 },
-        style: { fontFamily: 'SimHei, Heiti SC, sans-serif', fontSize: 32, color: '#ffffff', shadowColor: '#000000', shadowOpacity: 0.9, shadowBlur: 10, shadowDistance: 5, shadowAngle: -45 }
+        style: { fontFamily: 'SimHei, Heiti SC, sans-serif', fontSize: 32, color: '#ffffff', shadowColor: '#000000', shadowOpacity: 0.9, shadowBlur: 10, shadowDistance: 5, shadowAngle: -45 },
+        // NOTE: startTime=0, duration=0 表示默认覆盖全段视频
+        startTime: 0,
+        duration: 0,
       }]
     }
   })),
@@ -314,7 +322,10 @@ export const useStore = create<MatrixStore>((set) => ({
         file,
         url: URL.createObjectURL(file),
         pos: { x: 0, y: 0 },
-        scale: 1.0
+        scale: 1.0,
+        // NOTE: 默认全段叠加
+        startTime: 0,
+        duration: 0,
       }]
     }
   })),
@@ -807,8 +818,14 @@ const runSingleFfmpegTask = async (taskId: string, store: MatrixStore) => {
         const imgInputIdx = segTextFfmpegBaseIdx + validSegTextFiles.length + i;
         const nextOut = i === settings.images.length - 1 ? 'outv' : `outv_img_${i}`;
 
+        // 算出实际显示时间窗口（duration=0 表示全段显示）
+        const imgStart = imgElem.startTime ?? 0;
+        const imgDur = (imgElem.duration && imgElem.duration > 0) ? imgElem.duration : totalExportDuration;
+        const imgEnd = imgStart + imgDur;
+        const enableExpr = `enable='between(t,${imgStart.toFixed(3)},${imgEnd.toFixed(3)})'`;
+
         filterComplex += `[${imgInputIdx}:v]scale=iw*${imgElem.scale}:ih*${imgElem.scale}[scaled_img_${i}]; `;
-        filterComplex += `[${lastImageOut}][scaled_img_${i}]overlay=(W-w)/2+${imgElem.pos.x * scaleM_img}:(H-h)/2+${imgElem.pos.y * scaleM_img}[${nextOut}]; `;
+        filterComplex += `[${lastImageOut}][scaled_img_${i}]overlay=(W-w)/2+${imgElem.pos.x * scaleM_img}:(H-h)/2+${imgElem.pos.y * scaleM_img}:${enableExpr}[${nextOut}]; `;
         lastImageOut = nextOut;
       }
     } else {
@@ -1310,206 +1327,7 @@ const MaterialPoolPanel = () => {
   );
 };
 
-// -------------------------
-// 3. 中间预览区域 (Workspace)
-// -------------------------
 
-const SortableSegment = ({
-  seg,
-  isEditing,
-  isSelected,
-  setEditingSegId,
-  onSelect,
-  colorClasses,
-  boundPool,
-  pools,
-  updateTimelineSegment,
-  removeTimelineSegment,
-  duplicateTimelineSegment,
-  addTimelineSegment,
-  isLast
-}: any) => {
-  const {
-    attributes,
-    listeners,
-    setNodeRef,
-    transform,
-    transition,
-    isDragging,
-  } = useSortable({ id: seg.id });
-
-  const style = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-    zIndex: isDragging ? 100 : (isEditing ? 50 : 1),
-  };
-
-  // NOTE: editTab 是独立于每个片段弹窗的本地 Tab 状态
-  const [editTab, setEditTab] = React.useState<'basic' | 'subtitle'>('basic');
-
-  return (
-    <div
-      ref={setNodeRef}
-      style={style}
-      {...attributes}
-      {...listeners}
-      className={`flex flex-col items-center group relative flex-shrink-0 ${isDragging ? 'opacity-50 scale-105' : ''}`}
-    >
-      <div
-        onClick={(e) => {
-          e.stopPropagation();
-          if (e.shiftKey) {
-            // Shift+点击：切换如屏选状态
-            onSelect(seg.id);
-          } else {
-            // 普通点击：单独编辑
-            setEditingSegId(isEditing ? null : seg.id);
-          }
-        }}
-        className={`w-28 h-16 border flex flex-col justify-center px-2 hover:brightness-125 transition-all text-xs overflow-hidden cursor-pointer rounded relative
-          ${isSelected ? 'border-blue-400 ring-2 ring-blue-400/40 bg-blue-500/20' : isEditing ? 'border-orange-500 ring-2 ring-orange-500/30 ' + colorClasses : colorClasses}
-          ${isDragging ? 'shadow-2xl shadow-orange-500/20 border-orange-500/50' : ''}`}
-      >
-        {isSelected && (
-          <div className="absolute top-1 right-1 w-3.5 h-3.5 bg-blue-400 rounded-full flex items-center justify-center">
-            <svg viewBox="0 0 10 10" className="w-2 h-2 fill-white">
-              <polyline points="1.5,5 4,7.5 8.5,2.5" stroke="white" strokeWidth="1.8" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          </div>
-        )}
-        <div className="font-medium text-white/90 truncate w-full text-center">{boundPool?.name || '未知项'}</div>
-        <div className="text-white/50 text-[10px] select-none text-center">{seg.duration.toFixed(1)}s</div>
-      </div>
-
-      {isEditing && (
-        <div
-          onClick={e => e.stopPropagation()} // 防止点击内部触发拖拽
-          className="absolute -top-12 left-1/2 -translate-x-1/2 bg-zinc-900 border border-white/20 p-2 rounded-lg shadow-2xl flex flex-col gap-2 z-50 w-56 cursor-default"
-          style={{ top: 'auto', bottom: 'calc(100% + 8px)' }}
-        >
-          {/* Tab 切换栏 */}
-          <div className="flex gap-1 border-b border-white/10 pb-1 mb-1">
-            <button
-              onClick={() => setEditTab('basic')}
-              className={`text-[10px] px-2 py-0.5 rounded ${editTab === 'basic' ? 'bg-orange-500/30 text-orange-300' : 'text-white/50 hover:text-white/80'}`}
-            >基础</button>
-            <button
-              onClick={() => setEditTab('subtitle')}
-              className={`text-[10px] px-2 py-0.5 rounded ${editTab === 'subtitle' ? 'bg-orange-500/30 text-orange-300' : 'text-white/50 hover:text-white/80'}`}
-            >独立字幕</button>
-          </div>
-
-          {editTab === 'basic' ? (
-            <>
-          <select
-            value={seg.poolId}
-            onChange={e => {
-              const newPoolId = e.target.value;
-              const targetPool = pools.find((p: any) => p.id === newPoolId);
-              let newDuration = seg.duration;
-              if (targetPool && targetPool.files.length > 0) {
-                const validDurations = targetPool.files.map((f: any) => f.duration).filter((d: number) => d > 0);
-                if (validDurations.length > 0) {
-                  newDuration = Math.min(...validDurations);
-                }
-              }
-              updateTimelineSegment(seg.id, { poolId: newPoolId, duration: newDuration });
-            }}
-            className="bg-black/50 text-white/90 text-xs p-1 rounded border border-white/10 outline-none w-full"
-          >
-            {pools.map((p: any) => <option key={p.id} value={p.id}>{p.name}</option>)}
-          </select>
-
-          <div className="flex items-center gap-1">
-            <span className="text-white/50 text-[10px]">时长</span>
-            <input
-              type="number"
-              step="0.1"
-              min="0.1"
-              value={seg.duration}
-              onChange={e => updateTimelineSegment(seg.id, { duration: parseFloat(e.target.value) || 0.1 })}
-              className="bg-black/50 text-white/90 text-xs p-1 rounded border border-white/10 w-16 text-center outline-none"
-            />
-            <span className="text-white/50 text-[10px]">s</span>
-
-            <div className="flex-1 flex justify-end gap-1">
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  duplicateTimelineSegment(seg.id);
-                  setEditingSegId(null); // Optional: close editor after duplication
-                }}
-                className="text-white/60 hover:text-white hover:bg-white/10 p-1 rounded transition"
-                title="复制片段"
-              >
-                <Copy className="w-3 h-3" />
-              </button>
-              <button onClick={() => removeTimelineSegment(seg.id)} className="text-red-400 hover:bg-white/10 p-1 rounded transition" title="删除片段">
-                <Trash2 className="w-3 h-3" />
-              </button>
-            </div>
-          </div>
-            </>
-          ) : (
-            // 独立字幕编辑面板
-            <div className="flex flex-col gap-1.5">
-              <span className="text-[10px] text-white/40">此段独立字幕（优先于全局字幕）</span>
-              {(seg.segmentTexts || ['']).map((txt: string, ti: number) => (
-                <div key={ti} className="flex gap-1 items-start">
-                  <textarea
-                    value={txt}
-                    rows={2}
-                    placeholder={`字幕行 ${ti + 1}`}
-                    onChange={e => {
-                      const newTexts = [...(seg.segmentTexts || [''])];
-                      newTexts[ti] = e.target.value;
-                      updateTimelineSegment(seg.id, { segmentTexts: newTexts });
-                    }}
-                    className="flex-1 bg-black/50 text-white/90 text-xs p-1 rounded border border-white/10 outline-none resize-none"
-                  />
-                  <button
-                    onClick={() => {
-                      const newTexts = (seg.segmentTexts || ['']).filter((_: string, i: number) => i !== ti);
-                      updateTimelineSegment(seg.id, { segmentTexts: newTexts.length ? newTexts : [''] });
-                    }}
-                    className="text-red-400/60 hover:text-red-400 mt-0.5"
-                  ><Trash2 className="w-3 h-3" /></button>
-                </div>
-              ))}
-              <button
-                onClick={() => {
-                  const newTexts = [...(seg.segmentTexts || ['']), ''];
-                  updateTimelineSegment(seg.id, { segmentTexts: newTexts });
-                }}
-                className="text-[10px] text-white/50 hover:text-orange-400 border border-dashed border-white/10 rounded py-0.5 hover:border-orange-400/40 transition"
-              >+ 新增字幕行</button>
-              {/* 清除按钮 */}
-              {seg.segmentTexts && seg.segmentTexts.some((t: string) => t.trim()) && (
-                <button
-                  onClick={() => updateTimelineSegment(seg.id, { segmentTexts: [] })}
-                  className="text-[10px] text-red-400/60 hover:text-red-400 border border-dashed border-red-400/20 rounded py-0.5 hover:border-red-400/40 transition"
-                >清除全部（恢复全局字幕）</button>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Add segment in-between */}
-      {!isLast && (
-        <div
-          className="absolute -right-4 top-1/2 -translate-y-1/2 w-6 h-6 z-10 bg-black border border-white/10 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition shadow-lg cursor-pointer hover:bg-orange-500/20"
-          onClick={(e) => {
-            e.stopPropagation();
-            addTimelineSegment(pools[0]?.id);
-          }}
-        >
-          <Plus className="w-3 h-3 text-white/50 hover:text-white" />
-        </div>
-      )}
-    </div>
-  );
-};
 
 const DraggableOverlay = ({
   children,
@@ -1562,6 +1380,244 @@ const DraggableOverlay = ({
   );
 };
 
+// -------------------------
+// NLE Video Block Component
+// -------------------------
+const NleVideoBlock = ({
+  seg, segLeft, pxPerSec, colorName, boundPool, pools,
+  isLast, isEditing, isSelected, setEditingSegId, onSelect,
+  updateTimelineSegment, removeTimelineSegment, duplicateTimelineSegment, addTimelineSegment
+}: any) => {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: seg.id });
+  const [editTab, setEditTab] = React.useState<'basic' | 'subtitle'>('basic');
+
+  // NOTE: 右边缘拖拽改变 duration
+  const resizing = React.useRef(false);
+  const resizeStartX = React.useRef(0);
+  const resizeStartDur = React.useRef(0);
+
+  const handleResizeStart = (e: React.PointerEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    resizing.current = true;
+    resizeStartX.current = e.clientX;
+    resizeStartDur.current = seg.duration;
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+  };
+  const handleResizeMove = (e: React.PointerEvent) => {
+    if (!resizing.current) return;
+    const dx = e.clientX - resizeStartX.current;
+    const newDur = Math.max(0.2, resizeStartDur.current + dx / pxPerSec);
+    updateTimelineSegment(seg.id, { duration: parseFloat(newDur.toFixed(2)) });
+  };
+  const handleResizeUp = (e: React.PointerEvent) => {
+    resizing.current = false;
+    (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+  };
+
+  const blockWidth = Math.max(seg.duration * pxPerSec, 24);
+  const style = {
+    transform: transform ? `translate3d(${transform.x}px, ${transform.y}px, 0)` : undefined,
+    transition,
+    left: segLeft,
+    width: blockWidth,
+    zIndex: isDragging ? 100 : (isEditing ? 50 : 1),
+  };
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={{ ...style, position: 'absolute', height: '48px', top: '8px' }}
+      className={`rounded border overflow-visible group
+        ${isSelected ? 'border-orange-400 ring-2 ring-orange-400/30' : `border-${colorName}-500/50 bg-${colorName}-500/10`}
+        ${isDragging ? 'opacity-60' : ''}
+      `}
+    >
+      {/* 拖拽主体 */}
+      <div
+        {...attributes}
+        {...listeners}
+        className="absolute inset-0 flex flex-col items-start justify-center px-2 cursor-grab active:cursor-grabbing select-none"
+        onClick={(e) => { e.stopPropagation(); setEditingSegId(isEditing ? null : seg.id); onSelect(seg.id); }}
+      >
+        <span className="text-[10px] text-white/80 font-medium truncate w-full">{boundPool?.name || '?'}</span>
+        <span className="text-[9px] text-white/40">{seg.duration.toFixed(1)}s</span>
+      </div>
+
+      {/* 右边缘拖拽手柄 */}
+      <div
+        className="absolute right-0 top-0 bottom-0 w-2.5 cursor-ew-resize flex items-center justify-center group/handle z-10"
+        onPointerDown={handleResizeStart}
+        onPointerMove={handleResizeMove}
+        onPointerUp={handleResizeUp}
+        onPointerCancel={handleResizeUp}
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="w-0.5 h-6 bg-white/20 rounded group-hover/handle:bg-white/60 transition" />
+      </div>
+
+      {/* 弹出编辑框 */}
+      {isEditing && (
+        <div
+          onClick={e => e.stopPropagation()}
+          className="absolute left-1/2 -translate-x-1/2 bg-zinc-900 border border-white/20 p-2 rounded-lg shadow-2xl flex flex-col gap-2 z-50 w-56 cursor-default"
+          style={{ top: 'auto', bottom: 'calc(100% + 8px)' }}
+        >
+          <div className="flex gap-1 border-b border-white/10 pb-1 mb-1">
+            <button onClick={() => setEditTab('basic')} className={`text-[10px] px-2 py-0.5 rounded ${editTab === 'basic' ? 'bg-orange-500/30 text-orange-300' : 'text-white/50 hover:text-white/80'}`}>基础</button>
+            <button onClick={() => setEditTab('subtitle')} className={`text-[10px] px-2 py-0.5 rounded ${editTab === 'subtitle' ? 'bg-orange-500/30 text-orange-300' : 'text-white/50 hover:text-white/80'}`}>独立字幕</button>
+          </div>
+          {editTab === 'basic' ? (
+            <>
+              <select
+                value={seg.poolId}
+                onChange={e => {
+                  const newPoolId = e.target.value;
+                  const targetPool = pools.find((p: any) => p.id === newPoolId);
+                  let newDuration = seg.duration;
+                  if (targetPool && targetPool.files.length > 0) {
+                    const validDurations = targetPool.files.map((f: any) => f.duration).filter((d: number) => d > 0);
+                    if (validDurations.length > 0) newDuration = Math.min(...validDurations);
+                  }
+                  updateTimelineSegment(seg.id, { poolId: newPoolId, duration: newDuration });
+                }}
+                className="bg-black/50 text-white/90 text-xs p-1 rounded border border-white/10 outline-none w-full"
+              >
+                {pools.map((p: any) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+              <div className="flex items-center gap-1">
+                <span className="text-white/50 text-[10px]">时长</span>
+                <input
+                  type="number" step="0.1" min="0.1" value={seg.duration}
+                  onChange={e => updateTimelineSegment(seg.id, { duration: parseFloat(e.target.value) || 0.1 })}
+                  className="bg-black/50 text-white/90 text-xs p-1 rounded border border-white/10 w-16 text-center outline-none"
+                />
+                <span className="text-white/50 text-[10px]">s</span>
+                <div className="flex-1 flex justify-end gap-1">
+                  <button onClick={() => { duplicateTimelineSegment(seg.id); setEditingSegId(null); }} className="text-white/60 hover:text-white hover:bg-white/10 p-1 rounded transition" title="复制片段"><Copy className="w-3 h-3" /></button>
+                  <button onClick={() => removeTimelineSegment(seg.id)} className="text-red-400 hover:bg-white/10 p-1 rounded transition" title="删除片段"><Trash2 className="w-3 h-3" /></button>
+                </div>
+              </div>
+            </>
+          ) : (
+            <div className="flex flex-col gap-1.5">
+              <span className="text-[10px] text-white/40">此段独立字幕（优先于全局字幕）</span>
+              {(seg.segmentTexts || ['']).map((txt: string, ti: number) => (
+                <div key={ti} className="flex gap-1 items-start">
+                  <textarea
+                    value={txt} rows={2} placeholder={`字幕行 ${ti + 1}`}
+                    onChange={e => {
+                      const newTexts = [...(seg.segmentTexts || [''])];
+                      newTexts[ti] = e.target.value;
+                      updateTimelineSegment(seg.id, { segmentTexts: newTexts });
+                    }}
+                    className="flex-1 bg-black/50 text-white/90 text-xs p-1 rounded border border-white/10 outline-none resize-none"
+                  />
+                  <button onClick={() => { const newTexts = (seg.segmentTexts || ['']).filter((_: string, i: number) => i !== ti); updateTimelineSegment(seg.id, { segmentTexts: newTexts.length ? newTexts : [''] }); }} className="text-red-400/60 hover:text-red-400 mt-0.5"><Trash2 className="w-3 h-3" /></button>
+                </div>
+              ))}
+              <button onClick={() => updateTimelineSegment(seg.id, { segmentTexts: [...(seg.segmentTexts || ['']), ''] })} className="text-[10px] text-white/50 hover:text-orange-400 border border-dashed border-white/10 rounded py-0.5 hover:border-orange-400/40 transition">+ 新增字幕行</button>
+              {seg.segmentTexts && seg.segmentTexts.some((t: string) => t.trim()) && (
+                <button onClick={() => updateTimelineSegment(seg.id, { segmentTexts: [] })} className="text-[10px] text-red-400/60 hover:text-red-400 border border-dashed border-red-400/20 rounded py-0.5 hover:border-red-400/40 transition">清除全部（恢复全局字幕）</button>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 末尾 + 插入按钮 */}
+      {!isLast && (
+        <div
+          className="absolute -right-4 top-1/2 -translate-y-1/2 w-5 h-5 z-10 bg-black border border-white/10 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition shadow cursor-pointer hover:bg-orange-500/20"
+          onClick={(e) => { e.stopPropagation(); addTimelineSegment(pools[0]?.id); }}
+        ><Plus className="w-3 h-3 text-white/50" /></div>
+      )}
+    </div>
+  );
+};
+
+// -------------------------
+// NLE Overlay Block (Text / Image track row block)
+// -------------------------
+const NleOverlayBlock = ({
+  elemId: _elemId, label, color, left, width, totalPx, pxPerSec, totalVideoDuration: _totalVideoDuration, onUpdateTiming
+}: {
+  // NOTE: elemId 和 totalVideoDuration 目前未使用但保留以备未来扩展
+  elemId?: string; label: string; color: string;
+  left: number; width: number; totalPx: number; pxPerSec: number;
+  totalVideoDuration?: number; onUpdateTiming: (startTime: number, duration: number) => void;
+}) => {
+  const dragging = React.useRef(false);
+  const dragStartX = React.useRef(0);
+  const dragStartLeft = React.useRef(0);
+
+  const resizing = React.useRef(false);
+  const resizeStartX = React.useRef(0);
+  const resizeStartWidth = React.useRef(0);
+
+  // 左边拖动 → 改 startTime
+  const handleDragStart = (e: React.PointerEvent) => {
+    dragging.current = true;
+    dragStartX.current = e.clientX;
+    dragStartLeft.current = left;
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+  };
+  const handleDragMove = (e: React.PointerEvent) => {
+    if (!dragging.current) return;
+    const dx = e.clientX - dragStartX.current;
+    const newLeft = Math.max(0, Math.min(dragStartLeft.current + dx, totalPx - width));
+    const newStartTime = parseFloat((newLeft / pxPerSec).toFixed(2));
+    const durSec = parseFloat((width / pxPerSec).toFixed(2));
+    onUpdateTiming(newStartTime, durSec);
+  };
+  const handleDragUp = (e: React.PointerEvent) => {
+    dragging.current = false;
+    (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+  };
+
+  // 右边缘拖拽 → 改 duration
+  const handleResizeStart = (e: React.PointerEvent) => {
+    e.stopPropagation();
+    resizing.current = true;
+    resizeStartX.current = e.clientX;
+    resizeStartWidth.current = width;
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+  };
+  const handleResizeMove = (e: React.PointerEvent) => {
+    if (!resizing.current) return;
+    const dx = e.clientX - resizeStartX.current;
+    const newWidth = Math.max(24, Math.min(resizeStartWidth.current + dx, totalPx - left));
+    const newDur = parseFloat((newWidth / pxPerSec).toFixed(2));
+    const startTime = parseFloat((left / pxPerSec).toFixed(2));
+    onUpdateTiming(startTime, newDur);
+  };
+  const handleResizeUp = (e: React.PointerEvent) => {
+    resizing.current = false;
+    (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+  };
+
+  return (
+    <div
+      className={`absolute top-1 bottom-1 rounded border text-[9px] truncate select-none cursor-grab active:cursor-grabbing flex items-center ${color}`}
+      style={{ left, width }}
+      onPointerDown={handleDragStart}
+      onPointerMove={(e) => { handleDragMove(e); handleResizeMove(e); }}
+      onPointerUp={(e) => { handleDragUp(e); handleResizeUp(e); }}
+      onPointerCancel={(e) => { handleDragUp(e); handleResizeUp(e); }}
+    >
+      <span className="px-1.5 truncate flex-1">{label}</span>
+      {/* 右边缘拖拽手柄 */}
+      <div
+        className="absolute right-0 top-0 bottom-0 w-2.5 cursor-ew-resize flex items-center justify-center"
+        onPointerDown={handleResizeStart}
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="w-0.5 h-4 bg-white/30 rounded" />
+      </div>
+    </div>
+  );
+};
+
 const WorkspaceArea = () => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -1581,16 +1637,7 @@ const WorkspaceArea = () => {
     });
   };
 
-  // 批量更新所有选中片段的属性
-  const handleBulkUpdate = (updates: { duration?: number; poolId?: string }) => {
-    selectedSegIds.forEach(id => updateTimelineSegment(id, updates));
-  };
 
-  // 批量删除所有选中片段
-  const handleBulkDelete = () => {
-    selectedSegIds.forEach(id => removeTimelineSegment(id));
-    setSelectedSegIds(new Set());
-  };
 
   const handleExportScheme = () => {
     const data = {
@@ -1937,125 +1984,170 @@ const WorkspaceArea = () => {
         </div>
       </div>
 
-      {/* 轨道 */}
-      <div
-        className="h-64 shrink-0 border-t border-white/10 bg-zinc-950 flex flex-col"
-        onClick={() => setEditingSegId(null)}
-      >
-        <div className="h-10 border-b border-white/5 flex items-center px-4 justify-between bg-white/[0.02]">
-          <div className="flex gap-2 relative">
-            <button onClick={handleExportScheme} className="px-3 py-1 bg-white/5 hover:bg-white/10 rounded text-xs text-white/80 transition shadow-sm border border-white/5 flex items-center gap-1.5"><Download className="w-3 h-3" /> 保存剪辑方案</button>
-            <button onClick={() => fileInputRef.current?.click()} className="px-3 py-1 hover:bg-white/5 rounded text-xs text-white/80 transition border border-white/10 flex items-center gap-1.5"><FolderOpen className="w-3 h-3" /> 读取方案</button>
-            <input
-              type="file"
-              accept=".json"
-              ref={fileInputRef}
-              onChange={handleImportScheme}
-              className="hidden"
-            />
-          </div>
-          <div className="text-xs text-white/40 flex items-center gap-2">
-            <Clock className="w-3.5 h-3.5" />
-            <span className="font-mono text-orange-400">{currentTime.toFixed(1)}s</span> / {totalDuration.toFixed(1)}s
-          </div>
-        </div>
+      {/* NLE 多轨轨道区 */}
+      {(() => {
+        const PX_PER_SEC = 64; // NOTE: 1秒 = 64px
+        const totalVideoDuration = timeline.reduce((a, s) => a + s.duration, 0);
+        const totalPx = Math.max(totalVideoDuration * PX_PER_SEC, 400);
 
-        <div className="flex-1 p-4 overflow-x-auto custom-scrollbar" onClick={() => setSelectedSegIds(new Set())}>
-
-          {/* 批量操作浮动工具栏 */}
-          {selectedSegIds.size >= 1 && (
-            <div
-              className="mb-3 flex items-center gap-3 px-3 py-2 bg-blue-500/15 border border-blue-400/30 rounded-lg"
-              onClick={e => e.stopPropagation()}
-            >
-              <span className="text-blue-300 text-xs font-medium shrink-0">已选 {selectedSegIds.size} 段</span>
-              <div className="flex items-center gap-1.5">
-                <span className="text-white/40 text-xs">统一时长</span>
-                <input
-                  type="number" step="0.1" min="0.1" defaultValue="3"
-                  className="w-16 bg-black/40 text-white/90 text-xs px-2 py-1 rounded border border-white/10 outline-none text-center"
-                  id="bulkDuration"
-                />
-                <span className="text-white/40 text-xs">s</span>
-                <button
-                  onClick={() => handleBulkUpdate({ duration: parseFloat((document.getElementById('bulkDuration') as HTMLInputElement)?.value) || 3 })}
-                  className="text-[10px] px-2 py-1 bg-blue-500/20 text-blue-300 border border-blue-400/30 rounded hover:bg-blue-500/30 transition"
-                >应用</button>
+        return (
+          <div
+            className="shrink-0 border-t border-white/10 bg-zinc-950 flex flex-col"
+            style={{ height: 256 }}
+            onClick={() => setEditingSegId(null)}
+          >
+            {/* 工具栏 */}
+            <div className="h-10 border-b border-white/5 flex items-center px-4 justify-between bg-white/[0.02] shrink-0">
+              <div className="flex gap-2">
+                <button onClick={handleExportScheme} className="px-3 py-1 bg-white/5 hover:bg-white/10 rounded text-xs text-white/80 transition shadow-sm border border-white/5 flex items-center gap-1.5"><Download className="w-3 h-3" /> 保存剪辑方案</button>
+                <button onClick={() => fileInputRef.current?.click()} className="px-3 py-1 hover:bg-white/5 rounded text-xs text-white/80 transition border border-white/10 flex items-center gap-1.5"><FolderOpen className="w-3 h-3" /> 读取方案</button>
+                <input type="file" accept=".json" ref={fileInputRef} onChange={handleImportScheme} className="hidden" />
               </div>
-              <div className="flex items-center gap-1.5">
-                <span className="text-white/40 text-xs">统一素材池</span>
-                <select
-                  className="bg-black/50 text-white/80 text-xs px-2 py-1 rounded border border-white/10 outline-none"
-                  onChange={e => e.target.value && handleBulkUpdate({ poolId: e.target.value })}
-                  defaultValue=""
-                >
-                  <option value="">选择素材池…</option>
-                  {pools.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-                </select>
+              <div className="text-xs text-white/40 flex items-center gap-2">
+                <Clock className="w-3.5 h-3.5" />
+                <span className="font-mono text-orange-400">{currentTime.toFixed(1)}s</span> / {totalDuration.toFixed(1)}s
               </div>
-              <button
-                onClick={handleBulkDelete}
-                className="ml-auto flex items-center gap-1 text-xs text-red-400 hover:text-red-300 border border-red-500/30 px-2 py-1 rounded hover:bg-red-500/10 transition"
-              ><Trash2 className="w-3 h-3" />删除所选</button>
-              <button
-                onClick={() => setSelectedSegIds(new Set())}
-                className="text-white/40 hover:text-white text-xs px-2"
-              >取消选中</button>
             </div>
-          )}
 
-          <div className="flex gap-2 min-w-max items-center h-full relative">
-            <DndContext
-              sensors={sensors}
-              collisionDetection={closestCenter}
-              onDragEnd={handleDragEnd}
-            >
-              <SortableContext
-                items={timeline.map(t => t.id)}
-                strategy={horizontalListSortingStrategy}
-              >
-                {timeline.map((seg, idx) => {
-                  const boundPool = pools.find(p => p.id === seg.poolId);
-                  const poolIdx = pools.findIndex(p => p.id === seg.poolId);
-                  const colorName = getPoolColor(Math.max(0, poolIdx));
-                  const isEditing = editingSegId === seg.id;
-                  const colorClasses = `border-${colorName}-500/50 bg-${colorName}-500/10`;
+            {/* 轨道主体：左标签 + 滚动区 */}
+            <div className="flex flex-1 overflow-hidden">
+              {/* 左侧轨道标签 */}
+              <div className="w-20 shrink-0 flex flex-col border-r border-white/5 text-[10px] text-white/40 font-medium">
+                <div className="h-5 border-b border-white/5 flex items-center px-2 bg-white/[0.01]"></div>
+                <div className="h-14 flex items-center px-2 border-b border-white/[0.04] bg-white/[0.005]">VIDEO</div>
+                {settings.texts && settings.texts.length > 0 && (
+                  <div className="h-10 flex items-center px-2 border-b border-white/[0.04] bg-white/[0.005] text-blue-400/60">SUBTITLE</div>
+                )}
+                {settings.images && settings.images.length > 0 && (
+                  <div className="h-10 flex items-center px-2 border-b border-white/[0.04] bg-white/[0.005] text-purple-400/60">OVERLAY</div>
+                )}
+              </div>
 
-                  return (
-                    <SortableSegment
-                      key={seg.id}
-                      seg={seg}
-                      idx={idx}
-                      isEditing={isEditing}
-                      isSelected={selectedSegIds.has(seg.id)}
-                      setEditingSegId={setEditingSegId}
-                      onSelect={handleToggleSelect}
-                      colorClasses={colorClasses}
-                      boundPool={boundPool}
-                      pools={pools}
-                      updateTimelineSegment={updateTimelineSegment}
-                      removeTimelineSegment={removeTimelineSegment}
-                      duplicateTimelineSegment={duplicateTimelineSegment}
-                      addTimelineSegment={addTimelineSegment}
-                      isLast={idx === timeline.length - 1}
-                    />
-                  );
-                })}
-              </SortableContext>
-            </DndContext>
+              {/* 右侧滚动时间轴 */}
+              <div className="flex-1 overflow-x-auto overflow-y-hidden custom-scrollbar">
+                <div style={{ width: totalPx + 120 }} className="h-full flex flex-col">
 
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                addTimelineSegment(pools[0]?.id);
-              }}
-              className="h-16 w-32 ml-4 rounded border border-dashed border-white/20 bg-white/5 hover:bg-white/10 flex items-center justify-center text-white/40 hover:text-white/80 transition shrink-0"
-            >
-              <Plus className="w-4 h-4 mr-1" /> 添加结构
-            </button>
+                  {/* 时间尺 */}
+                  <div className="h-5 flex items-center border-b border-white/5 shrink-0 relative" style={{ width: totalPx + 120 }}>
+                    {Array.from({ length: Math.ceil(totalVideoDuration + 2) }).map((_, i) => (
+                      <div key={i} className="absolute flex items-end pb-0.5" style={{ left: i * PX_PER_SEC }}>
+                        <div className="w-px h-2 bg-white/20" />
+                        <span className="text-[9px] text-white/30 ml-0.5">{i}s</span>
+                      </div>
+                    ))}
+                    {/* 播放头 */}
+                    <div className="absolute top-0 w-0.5 h-screen bg-orange-500/80 z-30 pointer-events-none" style={{ left: currentTime * PX_PER_SEC }} />
+                  </div>
+
+                  {/* VIDEO 轨 */}
+                  <div className="h-14 relative flex items-center shrink-0 border-b border-white/[0.04] bg-white/[0.005]">
+                    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+                      <SortableContext items={timeline.map(t => t.id)} strategy={horizontalListSortingStrategy}>
+                        {(() => {
+                          let offset = 0;
+                          return timeline.map((seg, idx) => {
+                            const segLeft = offset;
+                            offset += seg.duration * PX_PER_SEC;
+                            const boundPool = pools.find(p => p.id === seg.poolId);
+                            const poolIdx = pools.findIndex(p => p.id === seg.poolId);
+                            const colorName = getPoolColor(Math.max(0, poolIdx));
+
+                            return (
+                              <NleVideoBlock
+                                key={seg.id}
+                                seg={seg}
+                                idx={idx}
+                                segLeft={segLeft}
+                                pxPerSec={PX_PER_SEC}
+                                colorName={colorName}
+                                boundPool={boundPool}
+                                pools={pools}
+                                isLast={idx === timeline.length - 1}
+                                isEditing={editingSegId === seg.id}
+                                isSelected={selectedSegIds.has(seg.id)}
+                                setEditingSegId={setEditingSegId}
+                                onSelect={handleToggleSelect}
+                                updateTimelineSegment={updateTimelineSegment}
+                                removeTimelineSegment={removeTimelineSegment}
+                                duplicateTimelineSegment={duplicateTimelineSegment}
+                                addTimelineSegment={addTimelineSegment}
+                              />
+                            );
+                          });
+                        })()}
+                      </SortableContext>
+                    </DndContext>
+
+                    {/* 添加片段按钒 */}
+                    <div
+                      className="absolute flex items-center justify-center h-10 w-14 border border-dashed border-white/20 rounded text-white/30 hover:text-white/70 hover:border-white/40 transition cursor-pointer text-[10px] shrink-0"
+                      style={{ left: totalVideoDuration * PX_PER_SEC + 12 }}
+                      onClick={(e) => { e.stopPropagation(); addTimelineSegment(pools[0]?.id); }}
+                    >
+                      <Plus className="w-3 h-3 mr-0.5" /> 加
+                    </div>
+                  </div>
+
+                  {/* SUBTITLE 轨 */}
+                  {settings.texts && settings.texts.length > 0 && (
+                    <div className="h-10 relative shrink-0 border-b border-white/[0.04] bg-blue-950/10">
+                      {settings.texts.map(textElem => {
+                        const elemDur = textElem.duration > 0 ? textElem.duration : totalVideoDuration;
+                        const elemLeft = textElem.startTime * PX_PER_SEC;
+                        const elemWidth = Math.max(elemDur * PX_PER_SEC, 24);
+                        return (
+                          <NleOverlayBlock
+                            key={textElem.id}
+                            elemId={textElem.id}
+                            label={textElem.text || '字幕'}
+                            color="bg-blue-500/20 border-blue-400/40 text-blue-200"
+                            left={elemLeft}
+                            width={elemWidth}
+                            totalPx={totalPx}
+                            pxPerSec={PX_PER_SEC}
+                            totalVideoDuration={totalVideoDuration}
+                            onUpdateTiming={(startTime, duration) =>
+                              updateTextElement(textElem.id, { startTime, duration })
+                            }
+                          />
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* IMAGE 轨 */}
+                  {settings.images && settings.images.length > 0 && (
+                    <div className="h-10 relative shrink-0 border-b border-white/[0.04] bg-purple-950/10">
+                      {settings.images.map(imgElem => {
+                        const elemDur = imgElem.duration > 0 ? imgElem.duration : totalVideoDuration;
+                        const elemLeft = imgElem.startTime * PX_PER_SEC;
+                        const elemWidth = Math.max(elemDur * PX_PER_SEC, 24);
+                        return (
+                          <NleOverlayBlock
+                            key={imgElem.id}
+                            elemId={imgElem.id}
+                            label={imgElem.file?.name || '\u56fe\u7247'}
+                            color="bg-purple-500/20 border-purple-400/40 text-purple-200"
+                            left={elemLeft}
+                            width={elemWidth}
+                            totalPx={totalPx}
+                            pxPerSec={PX_PER_SEC}
+                            totalVideoDuration={totalVideoDuration}
+                            onUpdateTiming={(startTime, duration) =>
+                              updateImageElement(imgElem.id, { startTime, duration })
+                            }
+                          />
+                        );
+                      })}
+                    </div>
+                  )}
+
+                </div>
+              </div>
+            </div>
           </div>
-        </div>
-      </div>
+        );
+      })()}
     </div >
   );
 };
