@@ -286,20 +286,31 @@ export const useStore = create<MatrixStore>((set) => ({
 
   setFfmpegStatus: (status) => set({ ffmpegStatus: status }),
 
-  addTextElement: () => set((state) => ({
-    settings: {
-      ...state.settings,
-      texts: [...state.settings.texts, {
-        id: 'text-' + Date.now().toString() + '-' + Math.random().toString(36).substr(2, 5),
-        text: '新字幕内容',
-        pos: { x: 0, y: 0 },
-        style: { fontFamily: 'SimHei, Heiti SC, sans-serif', fontSize: 32, color: '#ffffff', shadowColor: '#000000', shadowOpacity: 0.9, shadowBlur: 10, shadowDistance: 5, shadowAngle: -45 },
-        // NOTE: startTime=0, duration=0 表示默认覆盖全段视频
-        startTime: 0,
-        duration: 0,
-      }]
-    }
-  })),
+  addTextElement: () => set((state) => {
+    let maxEnd = 0;
+    const texts = state.settings.texts || [];
+    const totalVideoDuration = state.timeline.reduce((a, s) => a + s.duration, 0);
+    texts.forEach(t => {
+      const dur = t.duration > 0 ? t.duration : totalVideoDuration;
+      const end = t.startTime + dur;
+      if (end > maxEnd) maxEnd = end;
+    });
+    
+    return {
+      settings: {
+        ...state.settings,
+        texts: [...texts, {
+          id: 'text-' + Date.now().toString() + '-' + Math.random().toString(36).substr(2, 5),
+          text: '新字幕内容',
+          pos: { x: 0, y: 0 },
+          style: { fontFamily: 'SimHei, Heiti SC, sans-serif', fontSize: 32, color: '#ffffff', shadowColor: '#000000', shadowOpacity: 0.9, shadowBlur: 10, shadowDistance: 5, shadowAngle: -45 },
+          // NOTE: Append after the last subtitle end
+          startTime: maxEnd,
+          duration: 3,
+        }]
+      }
+    };
+  }),
 
   removeTextElement: (id) => set((state) => ({
     settings: {
@@ -315,21 +326,32 @@ export const useStore = create<MatrixStore>((set) => ({
     }
   })),
 
-  addImageElement: (file) => set((state) => ({
-    settings: {
-      ...state.settings,
-      images: [...state.settings.images, {
-        id: 'img-' + Date.now().toString() + '-' + Math.random().toString(36).substr(2, 5),
-        file,
-        url: URL.createObjectURL(file),
-        pos: { x: 0, y: 0 },
-        scale: 1.0,
-        // NOTE: 默认全段叠加
-        startTime: 0,
-        duration: 0,
-      }]
-    }
-  })),
+  addImageElement: (file) => set((state) => {
+    let maxEnd = 0;
+    const images = state.settings.images || [];
+    const totalVideoDuration = state.timeline.reduce((a, s) => a + s.duration, 0);
+    images.forEach(img => {
+      const dur = img.duration > 0 ? img.duration : totalVideoDuration;
+      const end = img.startTime + dur;
+      if (end > maxEnd) maxEnd = end;
+    });
+
+    return {
+      settings: {
+        ...state.settings,
+        images: [...images, {
+          id: 'img-' + Date.now().toString() + '-' + Math.random().toString(36).substr(2, 5),
+          file,
+          url: URL.createObjectURL(file),
+          pos: { x: 0, y: 0 },
+          scale: 1.0,
+          // NOTE: Append after the last image end
+          startTime: maxEnd,
+          duration: 3,
+        }]
+      }
+    };
+  }),
 
   removeImageElement: (id) => set((state) => ({
     settings: {
