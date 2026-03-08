@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   DndContext,
   closestCenter,
@@ -1385,11 +1386,30 @@ const DraggableOverlay = ({
 // -------------------------
 const NleVideoBlock = ({
   seg, segLeft, pxPerSec, colorName, boundPool, pools,
-  isLast, isEditing, isSelected, setEditingSegId, onSelect,
-  updateTimelineSegment, removeTimelineSegment, duplicateTimelineSegment, addTimelineSegment
+  isEditing, isSelected, setEditingSegId, onSelect,
+  updateTimelineSegment, removeTimelineSegment, duplicateTimelineSegment
 }: any) => {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: seg.id });
   const [editTab, setEditTab] = React.useState<'basic' | 'subtitle'>('basic');
+
+  const [rect, setRect] = React.useState<DOMRect | null>(null);
+  const blockRef = React.useRef<HTMLDivElement>(null);
+
+  React.useEffect(() => {
+    if (isEditing && blockRef.current) {
+      const updateRect = () => {
+        if (blockRef.current) setRect(blockRef.current.getBoundingClientRect());
+      };
+      updateRect();
+      const scroller = blockRef.current.closest('.custom-scrollbar');
+      if (scroller) scroller.addEventListener('scroll', updateRect);
+      window.addEventListener('resize', updateRect);
+      return () => {
+        if (scroller) scroller.removeEventListener('scroll', updateRect);
+        window.removeEventListener('resize', updateRect);
+      };
+    }
+  }, [isEditing]);
 
   // NOTE: 右边缘拖拽改变 duration
   const resizing = React.useRef(false);
@@ -1426,7 +1446,11 @@ const NleVideoBlock = ({
 
   return (
     <div
-      ref={setNodeRef}
+      ref={(node) => {
+        setNodeRef(node);
+        // @ts-ignore
+        blockRef.current = node;
+      }}
       style={{ ...style, position: 'absolute', height: '48px', top: '8px' }}
       className={`rounded border overflow-visible group
         ${isSelected ? 'border-orange-400 ring-2 ring-orange-400/30' : `border-${colorName}-500/50 bg-${colorName}-500/10`}
@@ -1456,12 +1480,17 @@ const NleVideoBlock = ({
         <div className="w-0.5 h-6 bg-white/20 rounded group-hover/handle:bg-white/60 transition" />
       </div>
 
-      {/* 弹出编辑框 */}
-      {isEditing && (
+      {/* 弹出编辑框 (使用 createPortal 挂载到 body 脱离 overflow 回收裁剪) */}
+      {isEditing && rect && createPortal(
         <div
           onClick={e => e.stopPropagation()}
-          className="absolute left-1/2 -translate-x-1/2 bg-zinc-900 border border-white/20 p-2 rounded-lg shadow-2xl flex flex-col gap-2 z-50 w-56 cursor-default"
-          style={{ top: 'auto', bottom: 'calc(100% + 8px)' }}
+          className="bg-zinc-900 border border-white/20 p-2 rounded-lg shadow-2xl flex flex-col gap-2 z-[9999] w-56 cursor-default pointer-events-auto"
+          style={{
+            position: 'fixed',
+            left: rect.left + rect.width / 2,
+            top: rect.top - 8,
+            transform: 'translate(-50%, -100%)'
+          }}
         >
           <div className="flex gap-1 border-b border-white/10 pb-1 mb-1">
             <button onClick={() => setEditTab('basic')} className={`text-[10px] px-2 py-0.5 rounded ${editTab === 'basic' ? 'bg-orange-500/30 text-orange-300' : 'text-white/50 hover:text-white/80'}`}>基础</button>
@@ -1522,15 +1551,8 @@ const NleVideoBlock = ({
               )}
             </div>
           )}
-        </div>
-      )}
-
-      {/* 末尾 + 插入按钮 */}
-      {!isLast && (
-        <div
-          className="absolute -right-4 top-1/2 -translate-y-1/2 w-5 h-5 z-10 bg-black border border-white/10 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition shadow cursor-pointer hover:bg-orange-500/20"
-          onClick={(e) => { e.stopPropagation(); addTimelineSegment(pools[0]?.id); }}
-        ><Plus className="w-3 h-3 text-white/50" /></div>
+        </div>,
+        document.body
       )}
     </div>
   );
@@ -1540,12 +1562,12 @@ const NleVideoBlock = ({
 // NLE Overlay Block (Text / Image track row block)
 // -------------------------
 const NleOverlayBlock = ({
-  elemId: _elemId, label, color, left, width, totalPx, pxPerSec, totalVideoDuration: _totalVideoDuration, onUpdateTiming
+  elemId: _elemId, label, color, left, width, totalPx, pxPerSec, totalVideoDuration: _totalVideoDuration, snapPoints, onUpdateTiming
 }: {
   // NOTE: elemId 和 totalVideoDuration 目前未使用但保留以备未来扩展
   elemId?: string; label: string; color: string;
   left: number; width: number; totalPx: number; pxPerSec: number;
-  totalVideoDuration?: number; onUpdateTiming: (startTime: number, duration: number) => void;
+  totalVideoDuration?: number; snapPoints: number[]; onUpdateTiming: (startTime: number, duration: number) => void;
 }) => {
   const dragging = React.useRef(false);
   const dragStartX = React.useRef(0);
@@ -1557,6 +1579,7 @@ const NleOverlayBlock = ({
 
   // 左边拖动 → 改 startTime
   const handleDragStart = (e: React.PointerEvent) => {
+    e.stopPropagation();
     dragging.current = true;
     dragStartX.current = e.clientX;
     dragStartLeft.current = left;
@@ -1565,10 +1588,20 @@ const NleOverlayBlock = ({
   const handleDragMove = (e: React.PointerEvent) => {
     if (!dragging.current) return;
     const dx = e.clientX - dragStartX.current;
-    const newLeft = Math.max(0, Math.min(dragStartLeft.current + dx, totalPx - width));
-    const newStartTime = parseFloat((newLeft / pxPerSec).toFixed(2));
+    let newLeft = Math.max(0, Math.min(dragStartLeft.current + dx, totalPx - width));
+    let newStartTime = newLeft / pxPerSec;
+
+    // 吸附逻辑
+    const SNAP_SEC = 5 / pxPerSec;
+    for (const sp of snapPoints) {
+      if (Math.abs(newStartTime - sp) < SNAP_SEC) {
+        newStartTime = sp;
+        break;
+      }
+    }
+
     const durSec = parseFloat((width / pxPerSec).toFixed(2));
-    onUpdateTiming(newStartTime, durSec);
+    onUpdateTiming(parseFloat(newStartTime.toFixed(2)), durSec);
   };
   const handleDragUp = (e: React.PointerEvent) => {
     dragging.current = false;
@@ -1586,10 +1619,22 @@ const NleOverlayBlock = ({
   const handleResizeMove = (e: React.PointerEvent) => {
     if (!resizing.current) return;
     const dx = e.clientX - resizeStartX.current;
-    const newWidth = Math.max(24, Math.min(resizeStartWidth.current + dx, totalPx - left));
-    const newDur = parseFloat((newWidth / pxPerSec).toFixed(2));
-    const startTime = parseFloat((left / pxPerSec).toFixed(2));
-    onUpdateTiming(startTime, newDur);
+    let newWidth = Math.max(24, Math.min(resizeStartWidth.current + dx, totalPx - left));
+    let newDur = newWidth / pxPerSec;
+    const startTime = left / pxPerSec;
+    let endTime = startTime + newDur;
+
+    // 吸附结束时间逻辑
+    const SNAP_SEC = 5 / pxPerSec;
+    for (const sp of snapPoints) {
+      if (Math.abs(endTime - sp) < SNAP_SEC) {
+        endTime = sp;
+        newDur = Math.max(0.1, endTime - startTime);
+        break;
+      }
+    }
+
+    onUpdateTiming(parseFloat(startTime.toFixed(2)), parseFloat(newDur.toFixed(2)));
   };
   const handleResizeUp = (e: React.PointerEvent) => {
     resizing.current = false;
@@ -1627,6 +1672,18 @@ const WorkspaceArea = () => {
   const videoRef = React.useRef<HTMLVideoElement>(null);
   const bgmAudioRef = React.useRef<HTMLAudioElement | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
+
+  // 从 timeline 推演可吸附的节点
+  const snapPoints = React.useMemo(() => {
+    const points = new Set<number>();
+    points.add(0);
+    let acc = 0;
+    timeline.forEach(seg => {
+      acc += seg.duration;
+      points.add(parseFloat(acc.toFixed(2)));
+    });
+    return Array.from(points);
+  }, [timeline]);
 
   // 切换单个片段的选择状态
   const handleToggleSelect = (segId: string) => {
@@ -2106,6 +2163,7 @@ const WorkspaceArea = () => {
                             totalPx={totalPx}
                             pxPerSec={PX_PER_SEC}
                             totalVideoDuration={totalVideoDuration}
+                            snapPoints={snapPoints}
                             onUpdateTiming={(startTime, duration) =>
                               updateTextElement(textElem.id, { startTime, duration })
                             }
@@ -2133,6 +2191,7 @@ const WorkspaceArea = () => {
                             totalPx={totalPx}
                             pxPerSec={PX_PER_SEC}
                             totalVideoDuration={totalVideoDuration}
+                            snapPoints={snapPoints}
                             onUpdateTiming={(startTime, duration) =>
                               updateImageElement(imgElem.id, { startTime, duration })
                             }
