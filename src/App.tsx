@@ -25,13 +25,10 @@ import { create } from 'zustand';
 import { v4 as uuidv4 } from 'uuid';
 
 import { FFmpeg } from '@ffmpeg/ffmpeg';
-import { fetchFile } from '@ffmpeg/util';
+import { fetchFile, toBlobURL } from '@ffmpeg/util';
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
 import { set as idbSet, get as idbGet, del as idbDel } from 'idb-keyval';
-
-import coreURL from '@ffmpeg/core?url';
-import wasmURL from '@ffmpeg/core/wasm?url';
 
 // ==========================================
 // Types & Store
@@ -383,10 +380,13 @@ const getFFmpeg = async () => {
   try {
     ffmpeg = new FFmpeg();
 
-    // 使用本地 vite?url 引用和取消预构建，彻底实现秒速加载和防注入
+    // Use a CDN to load the FFmpeg core to prevent the 30MB wasm file from 
+    // being bundled into the app (which causes Vercel/Cloudflare Pages deployment to fail 
+    // due to > 25MB individual asset limits).
+    const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
     await ffmpeg.load({
-      coreURL,
-      wasmURL,
+      coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+      wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
     });
 
     store.setFfmpegStatus('ready');
@@ -600,7 +600,11 @@ const runSingleFfmpegTask = async (taskId: string, store: MatrixStore) => {
   const ff = new FFmpeg();
 
   try {
-    await ff.load({ coreURL, wasmURL });
+    const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
+    await ff.load({
+      coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+      wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+    });
 
     // 监听独立实例的 progress //
     ff.on('log', ({ message }) => {
