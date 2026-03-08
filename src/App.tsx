@@ -56,6 +56,8 @@ export type TimelineSegment = {
   id: string;
   poolId: string;
   duration: number; // in seconds
+  // 独立字幕：若存在则优先于全局字幕，若为空数组或 undefined 则不显示任何字幕
+  segmentTexts?: string[];
 };
 
 export type BgmFile = {
@@ -629,6 +631,9 @@ const runSingleFfmpegTask = async (taskId: string, store: MatrixStore) => {
 
     const bgmInputIndex = inputs.length; // BGM input 的 index（最后一个）
 
+    // NOTE: segTextFilenames 在下方生成后被引用，这里展开处理
+    // 文字叠加在 concat 之前，简化为: 先 concat，再统一 overlay (post-concat)
+    // 如果段内有独立字幕则在 post-concat overlay 阶段扮演大角色
     inputs.forEach((input, index) => {
       let vFilter = `[${index}:v]trim=0:${input.duration},setpts=PTS-STARTPTS`;
       let aFilter = `[${index}:a]atrim=0:${input.duration},asetpts=PTS-STARTPTS,volume=${bgm.videoVolume}`;
@@ -670,19 +675,31 @@ const runSingleFfmpegTask = async (taskId: string, store: MatrixStore) => {
     filterComplex += `${outSpecs.join('')}concat=n=${inputs.length}:v=1:a=1[outv_concat][outa_raw]; `;
 
     // ── Canvas 文字叠加（取代 drawtext，100% 兼容中文和特殊字符）──
+    // NOTE: 文字在每个片段独立成一张 canvas PNG，然后在 filter_complex 内嵌叠加
     const OW = 1080, OH = 1920;
     const scaleM = OH / 600;
-    let titleOverlayFilename = '';
-    const hasAnyTitle = settings.texts && settings.texts.length > 0 && settings.texts.some(t => t.text.trim() !== '');
 
-    if (hasAnyTitle) {
+    // 根据全局字幕 style 生成默认样式
+    const defaultTextStyle: TextStyle = {
+      fontFamily: 'SimHei, Heiti SC, sans-serif',
+      fontSize: 32,
+      color: '#ffffff',
+      shadowColor: '#000000',
+      shadowOpacity: 0.9,
+      shadowBlur: 15,
+      shadowDistance: 5,
+      shadowAngle: -45,
+    };
+
+    const renderTextToPng = async (
+      entries: { text: string; style: TextStyle; pos: { x: number; y: number } }[]
+    ): Promise<Uint8Array> => {
       const cvs = document.createElement('canvas');
       cvs.width = OW; cvs.height = OH;
       const ctx = cvs.getContext('2d')!;
       ctx.clearRect(0, 0, OW, OH);
-
-      const drawCanvasText = (text: string, style: TextStyle, pos: { x: number; y: number }) => {
-        if (!text || !text.trim()) return;
+      entries.forEach(({ text, style, pos }) => {
+        if (!text.trim()) return;
         ctx.save();
         const sr = parseInt(style.shadowColor.slice(1, 3), 16);
         const sg = parseInt(style.shadowColor.slice(3, 5), 16);
@@ -697,34 +714,86 @@ const runSingleFfmpegTask = async (taskId: string, store: MatrixStore) => {
         ctx.textBaseline = 'middle';
         ctx.fillText(text, OW / 2 + pos.x * scaleM, OH / 2 + pos.y * scaleM);
         ctx.restore();
-      };
-
-      settings.texts.forEach(t => {
-        drawCanvasText(t.text, t.style, t.pos);
       });
-
-      const pngBytes = await new Promise<Uint8Array>((resolve) => {
+      return new Promise<Uint8Array>((resolve) => {
         cvs.toBlob(async (blob) => {
           if (!blob) { resolve(new Uint8Array()); return; }
           resolve(new Uint8Array(await blob.arrayBuffer()));
         }, 'image/png');
       });
+    };
 
-      if (pngBytes.length > 0) {
-        titleOverlayFilename = 'title_overlay.png';
-        await ff.writeFile(titleOverlayFilename, pngBytes);
-        const overlayIdx = inputs.length + (hasBgm ? 1 : 0);
-        filterComplex += `[outv_concat][${overlayIdx}:v]overlay=0:0[outv_texts]; `;
-      } else {
-        filterComplex += `[outv_concat]copy[outv_texts]; `;
+    // 为每个片段独立生成字幕 PNG（如果有内容）
+    const segTextFilenames: (string | null)[] = [];
+
+    for (let si = 0; si < timeline.length; si++) {
+      const seg = timeline[si];
+      let textEntries: { text: string; style: TextStyle; pos: { x: number; y: number } }[] = [];
+
+      if (seg.segmentTexts && seg.segmentTexts.some((t: string) => t.trim())) {
+        // 使用此片段独立字幕，样式公用全局第一服文字设置，没有则用默认
+        const baseStyle: TextStyle = settings.texts.length > 0 ? settings.texts[0].style : defaultTextStyle;
+        const basePos = settings.texts.length > 0 ? settings.texts[0].pos : { x: 0, y: 0 };
+        textEntries = seg.segmentTexts
+          .filter((t: string) => t.trim())
+          .map((t: string) => ({ text: t, style: baseStyle, pos: basePos }));
+      } else if (settings.texts && settings.texts.some(t => t.text.trim())) {
+        // 全局字幕兼容
+        textEntries = settings.texts.filter(t => t.text.trim()).map(t => ({
+          text: t.text, style: t.style, pos: t.pos
+        }));
       }
-    } else {
-      filterComplex += `[outv_concat]copy[outv_texts]; `;
+
+      if (textEntries.length > 0) {
+        const pngBytes = await renderTextToPng(textEntries);
+        if (pngBytes.length > 0) {
+          const fname = `seg_text_${si}.png`;
+          await ff.writeFile(fname, pngBytes);
+          segTextFilenames.push(fname);
+        } else {
+          segTextFilenames.push(null);
+        }
+      } else {
+        segTextFilenames.push(null);
+      }
     }
 
+    // 将每段字幕 PNG 作为 FFmpeg 输入加入（BGM 之后）
+    const validSegTextFiles = segTextFilenames.filter(f => f !== null) as string[];
+
+    // 计算各 segment 的开始和结束时间
+    const segTimings: { start: number; end: number }[] = [];
+    let segCursor = 0;
+    for (const seg of timeline) {
+      segTimings.push({ start: segCursor, end: segCursor + seg.duration });
+      segCursor += seg.duration;
+    }
+
+    // 构建 post-concat 文字叠加链
+    const segTextFfmpegBaseIdx = inputs.length + (hasBgm ? 1 : 0);
+    let currentVideoNode = 'outv_concat';
+    let textNodeCounter = 0;
+
+    for (let si = 0; si < timeline.length; si++) {
+      const fname = segTextFilenames[si];
+      if (!fname) continue;
+      const { start, end } = segTimings[si];
+      const segInputIdx = segTextFfmpegBaseIdx + textNodeCounter;
+      const nextNode = `outv_seg_txt_${si}`;
+      // NOTE: overlay enable 参数允许它只在指定时间窗口内显示
+      filterComplex += `[${currentVideoNode}][${segInputIdx}:v]overlay=0:0:enable='between(t,${start.toFixed(3)},${end.toFixed(3)})'[${nextNode}]; `;
+      currentVideoNode = nextNode;
+      textNodeCounter++;
+    }
+
+    // 如果没有任何字幕， currentVideoNode 仍是 outv_concat
+    filterComplex += `[${currentVideoNode}]copy[outv_texts]; `;
+
     // ── 图片贴纸叠加 ──
+    const titleOverlayFilename = ''; // 保留，不再使用
     const imageFilenames: string[] = [];
     const hasImages = settings.images && settings.images.length > 0;
+    const scaleM_img = OH / 600;
 
     if (hasImages) {
       let lastImageOut = 'outv_texts';
@@ -735,12 +804,11 @@ const runSingleFfmpegTask = async (taskId: string, store: MatrixStore) => {
         await ff.writeFile(imgName, await fetchFile(imgElem.file));
         imageFilenames.push(imgName);
 
-        const imgInputIdx = inputs.length + (hasBgm ? 1 : 0) + (titleOverlayFilename ? 1 : 0) + i;
+        const imgInputIdx = segTextFfmpegBaseIdx + validSegTextFiles.length + i;
         const nextOut = i === settings.images.length - 1 ? 'outv' : `outv_img_${i}`;
 
-        // x=W/2 + pos.x - w/2  => 将锚点置于贴图中心，并支持 scale
         filterComplex += `[${imgInputIdx}:v]scale=iw*${imgElem.scale}:ih*${imgElem.scale}[scaled_img_${i}]; `;
-        filterComplex += `[${lastImageOut}][scaled_img_${i}]overlay=(W-w)/2+${imgElem.pos.x * scaleM}:(H-h)/2+${imgElem.pos.y * scaleM}[${nextOut}]; `;
+        filterComplex += `[${lastImageOut}][scaled_img_${i}]overlay=(W-w)/2+${imgElem.pos.x * scaleM_img}:(H-h)/2+${imgElem.pos.y * scaleM_img}[${nextOut}]; `;
         lastImageOut = nextOut;
       }
     } else {
@@ -748,24 +816,21 @@ const runSingleFfmpegTask = async (taskId: string, store: MatrixStore) => {
     }
 
     if (hasBgm) {
-      // BGM 裁剪到总时长 + 调节音量
       filterComplex += `[${bgmInputIndex}:a]atrim=0:${totalExportDuration},asetpts=PTS-STARTPTS,volume=${bgm.bgmVolume}[bgm_trimmed]; `;
-      // amix 混合原音频和 BGM
       filterComplex += `[outa_raw][bgm_trimmed]amix=inputs=2:duration=first:dropout_transition=0[outa]`;
     } else {
-      // 无 BGM 直接重命名
       filterComplex += `[outa_raw]acopy[outa]`;
     }
 
-    // 组装 -i 参数 (视频 + BGM + 文字叠层 + 图片叠层)
+    // 组装 -i 参数
     const ffmpegArgs: string[] = [];
     inputs.forEach(i => { ffmpegArgs.push('-i', i.filename); });
     if (hasBgm) ffmpegArgs.push('-i', bgmFilename);
-    if (titleOverlayFilename) ffmpegArgs.push('-i', titleOverlayFilename);
+    validSegTextFiles.forEach((fn: string) => { ffmpegArgs.push('-i', fn); });
     imageFilenames.forEach(img => { ffmpegArgs.push('-i', img); });
 
     if (settings.antiDupConfig?.enabled) {
-      ffmpegArgs.push('-map_metadata', '-1'); // Strip all metadata
+      ffmpegArgs.push('-map_metadata', '-1');
     }
 
     ffmpegArgs.push('-filter_complex', filterComplex);
@@ -790,6 +855,7 @@ const runSingleFfmpegTask = async (taskId: string, store: MatrixStore) => {
     for (const input of inputs) { await ff.deleteFile(input.filename); }
     if (hasBgm && bgmFilename) { await ff.deleteFile(bgmFilename); }
     if (titleOverlayFilename) { try { await ff.deleteFile(titleOverlayFilename); } catch (_) { } }
+    for (const fn of validSegTextFiles) { try { await ff.deleteFile(fn); } catch (_) { } }
     for (const imgName of imageFilenames) { try { await ff.deleteFile(imgName); } catch (_) { } }
 
     updateExportTask(taskId, {
@@ -1278,6 +1344,9 @@ const SortableSegment = ({
     zIndex: isDragging ? 100 : (isEditing ? 50 : 1),
   };
 
+  // NOTE: editTab 是独立于每个片段弹窗的本地 Tab 状态
+  const [editTab, setEditTab] = React.useState<'basic' | 'subtitle'>('basic');
+
   return (
     <div
       ref={setNodeRef}
@@ -1315,8 +1384,23 @@ const SortableSegment = ({
       {isEditing && (
         <div
           onClick={e => e.stopPropagation()} // 防止点击内部触发拖拽
-          className="absolute -top-12 left-1/2 -translate-x-1/2 bg-zinc-900 border border-white/20 p-2 rounded-lg shadow-2xl flex flex-col gap-2 z-50 w-48 cursor-default"
+          className="absolute -top-12 left-1/2 -translate-x-1/2 bg-zinc-900 border border-white/20 p-2 rounded-lg shadow-2xl flex flex-col gap-2 z-50 w-56 cursor-default"
+          style={{ top: 'auto', bottom: 'calc(100% + 8px)' }}
         >
+          {/* Tab 切换栏 */}
+          <div className="flex gap-1 border-b border-white/10 pb-1 mb-1">
+            <button
+              onClick={() => setEditTab('basic')}
+              className={`text-[10px] px-2 py-0.5 rounded ${editTab === 'basic' ? 'bg-orange-500/30 text-orange-300' : 'text-white/50 hover:text-white/80'}`}
+            >基础</button>
+            <button
+              onClick={() => setEditTab('subtitle')}
+              className={`text-[10px] px-2 py-0.5 rounded ${editTab === 'subtitle' ? 'bg-orange-500/30 text-orange-300' : 'text-white/50 hover:text-white/80'}`}
+            >独立字幕</button>
+          </div>
+
+          {editTab === 'basic' ? (
+            <>
           <select
             value={seg.poolId}
             onChange={e => {
@@ -1365,6 +1449,49 @@ const SortableSegment = ({
               </button>
             </div>
           </div>
+            </>
+          ) : (
+            // 独立字幕编辑面板
+            <div className="flex flex-col gap-1.5">
+              <span className="text-[10px] text-white/40">此段独立字幕（优先于全局字幕）</span>
+              {(seg.segmentTexts || ['']).map((txt: string, ti: number) => (
+                <div key={ti} className="flex gap-1 items-start">
+                  <textarea
+                    value={txt}
+                    rows={2}
+                    placeholder={`字幕行 ${ti + 1}`}
+                    onChange={e => {
+                      const newTexts = [...(seg.segmentTexts || [''])];
+                      newTexts[ti] = e.target.value;
+                      updateTimelineSegment(seg.id, { segmentTexts: newTexts });
+                    }}
+                    className="flex-1 bg-black/50 text-white/90 text-xs p-1 rounded border border-white/10 outline-none resize-none"
+                  />
+                  <button
+                    onClick={() => {
+                      const newTexts = (seg.segmentTexts || ['']).filter((_: string, i: number) => i !== ti);
+                      updateTimelineSegment(seg.id, { segmentTexts: newTexts.length ? newTexts : [''] });
+                    }}
+                    className="text-red-400/60 hover:text-red-400 mt-0.5"
+                  ><Trash2 className="w-3 h-3" /></button>
+                </div>
+              ))}
+              <button
+                onClick={() => {
+                  const newTexts = [...(seg.segmentTexts || ['']), ''];
+                  updateTimelineSegment(seg.id, { segmentTexts: newTexts });
+                }}
+                className="text-[10px] text-white/50 hover:text-orange-400 border border-dashed border-white/10 rounded py-0.5 hover:border-orange-400/40 transition"
+              >+ 新增字幕行</button>
+              {/* 清除按钮 */}
+              {seg.segmentTexts && seg.segmentTexts.some((t: string) => t.trim()) && (
+                <button
+                  onClick={() => updateTimelineSegment(seg.id, { segmentTexts: [] })}
+                  className="text-[10px] text-red-400/60 hover:text-red-400 border border-dashed border-red-400/20 rounded py-0.5 hover:border-red-400/40 transition"
+                >清除全部（恢复全局字幕）</button>
+              )}
+            </div>
+          )}
         </div>
       )}
 
