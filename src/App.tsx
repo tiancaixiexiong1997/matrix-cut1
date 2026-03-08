@@ -1606,6 +1606,7 @@ const NleOverlayBlock = ({
 };
 
 const WorkspaceArea = () => {
+  const [pxPerSec, setPxPerSec] = React.useState(64);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [previewIndices, setPreviewIndices] = useState<Record<string, number>>({});
@@ -1997,9 +1998,8 @@ const WorkspaceArea = () => {
 
       {/* NLE 多轨轨道区 */}
       {(() => {
-        const PX_PER_SEC = 64; // NOTE: 1秒 = 64px
         const totalVideoDuration = timeline.reduce((a, s) => a + s.duration, 0);
-        const totalPx = Math.max(totalVideoDuration * PX_PER_SEC, 400);
+        const totalPx = Math.max(totalVideoDuration * pxPerSec, 400);
 
         return (
           <div
@@ -2035,19 +2035,31 @@ const WorkspaceArea = () => {
               </div>
 
               {/* 右侧滚动时间轴 */}
-              <div className="flex-1 overflow-x-auto overflow-y-hidden custom-scrollbar min-w-0">
+              <div 
+                className="flex-1 overflow-x-auto overflow-y-hidden custom-scrollbar min-w-0"
+                onWheel={(e) => {
+                  // If vertical scroll occurs
+                  if (e.deltaY !== 0) {
+                    const zoomIn = e.deltaY < 0;
+                    setPxPerSec(prev => {
+                      const baseStep = prev > 100 ? 16 : 8;
+                      return Math.max(10, Math.min(prev + (zoomIn ? baseStep : -baseStep), 400));
+                    });
+                  }
+                }}
+              >
                 <div style={{ width: totalPx + 120 }} className="h-full flex flex-col">
 
                   {/* 时间尺 */}
                   <div className="h-5 flex items-center border-b border-white/5 shrink-0 relative" style={{ width: totalPx + 120 }}>
                     {Array.from({ length: Math.ceil(totalVideoDuration + 2) }).map((_, i) => (
-                      <div key={i} className="absolute flex items-end pb-0.5" style={{ left: i * PX_PER_SEC }}>
+                      <div key={i} className="absolute flex items-end pb-0.5" style={{ left: i * pxPerSec }}>
                         <div className="w-px h-2 bg-white/20" />
                         <span className="text-[9px] text-white/30 ml-0.5">{i}s</span>
                       </div>
                     ))}
                     {/* 播放头 */}
-                    <div className="absolute top-0 w-0.5 h-screen bg-orange-500/80 z-30 pointer-events-none" style={{ left: currentTime * PX_PER_SEC }} />
+                    <div className="absolute top-0 w-0.5 h-screen bg-orange-500/80 z-30 pointer-events-none" style={{ left: currentTime * pxPerSec }} />
                   </div>
 
                   {/* VIDEO 轨 */}
@@ -2058,7 +2070,7 @@ const WorkspaceArea = () => {
                           let offset = 0;
                           return timeline.map((seg, idx) => {
                             const segLeft = offset;
-                            offset += seg.duration * PX_PER_SEC;
+                            offset += seg.duration * pxPerSec;
                             const boundPool = pools.find(p => p.id === seg.poolId);
                             const poolIdx = pools.findIndex(p => p.id === seg.poolId);
                             const colorName = getPoolColor(Math.max(0, poolIdx));
@@ -2069,7 +2081,7 @@ const WorkspaceArea = () => {
                                 seg={seg}
                                 idx={idx}
                                 segLeft={segLeft}
-                                pxPerSec={PX_PER_SEC}
+                                pxPerSec={pxPerSec}
                                 colorName={colorName}
                                 boundPool={boundPool}
                                 pools={pools}
@@ -2092,7 +2104,7 @@ const WorkspaceArea = () => {
                     {/* 添加片段按钒 */}
                     <div
                       className="absolute flex items-center justify-center h-10 w-14 border border-dashed border-white/20 rounded text-white/30 hover:text-white/70 hover:border-white/40 transition cursor-pointer text-[10px] shrink-0"
-                      style={{ left: totalVideoDuration * PX_PER_SEC + 12 }}
+                      style={{ left: totalVideoDuration * pxPerSec + 12 }}
                       onClick={(e) => { e.stopPropagation(); addTimelineSegment(pools[0]?.id); }}
                     >
                       <Plus className="w-3 h-3 mr-0.5" /> 加
@@ -2104,8 +2116,8 @@ const WorkspaceArea = () => {
                     <div className="h-10 relative shrink-0 border-b border-white/[0.04] bg-blue-950/10">
                       {settings.texts.map(textElem => {
                         const elemDur = textElem.duration > 0 ? textElem.duration : totalVideoDuration;
-                        const elemLeft = textElem.startTime * PX_PER_SEC;
-                        const elemWidth = Math.max(elemDur * PX_PER_SEC, 24);
+                        const elemLeft = textElem.startTime * pxPerSec;
+                        const elemWidth = Math.max(elemDur * pxPerSec, 24);
                         return (
                           <NleOverlayBlock
                             key={textElem.id}
@@ -2115,7 +2127,7 @@ const WorkspaceArea = () => {
                             left={elemLeft}
                             width={elemWidth}
                             totalPx={totalPx}
-                            pxPerSec={PX_PER_SEC}
+                            pxPerSec={pxPerSec}
                             totalVideoDuration={totalVideoDuration}
                             snapPoints={snapPoints}
                             onUpdateTiming={(startTime, duration) =>
@@ -2132,8 +2144,8 @@ const WorkspaceArea = () => {
                     <div className="h-10 relative shrink-0 border-b border-white/[0.04] bg-purple-950/10">
                       {settings.images.map(imgElem => {
                         const elemDur = imgElem.duration > 0 ? imgElem.duration : totalVideoDuration;
-                        const elemLeft = imgElem.startTime * PX_PER_SEC;
-                        const elemWidth = Math.max(elemDur * PX_PER_SEC, 24);
+                        const elemLeft = imgElem.startTime * pxPerSec;
+                        const elemWidth = Math.max(elemDur * pxPerSec, 24);
                         return (
                           <NleOverlayBlock
                             key={imgElem.id}
@@ -2143,7 +2155,7 @@ const WorkspaceArea = () => {
                             left={elemLeft}
                             width={elemWidth}
                             totalPx={totalPx}
-                            pxPerSec={PX_PER_SEC}
+                            pxPerSec={pxPerSec}
                             totalVideoDuration={totalVideoDuration}
                             snapPoints={snapPoints}
                             onUpdateTiming={(startTime, duration) =>
