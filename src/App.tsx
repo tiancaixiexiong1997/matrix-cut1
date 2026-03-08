@@ -692,16 +692,6 @@ const runSingleFfmpegTask = async (taskId: string, store: MatrixStore) => {
     const scaleM = OH / 600;
 
     // 根据全局字幕 style 生成默认样式
-    const defaultTextStyle: TextStyle = {
-      fontFamily: 'SimHei, Heiti SC, sans-serif',
-      fontSize: 32,
-      color: '#ffffff',
-      shadowColor: '#000000',
-      shadowOpacity: 0.9,
-      shadowBlur: 15,
-      shadowDistance: 5,
-      shadowAngle: -45,
-    };
 
     const renderTextToPng = async (
       entries: { text: string; style: TextStyle; pos: { x: number; y: number } }[]
@@ -735,70 +725,52 @@ const runSingleFfmpegTask = async (taskId: string, store: MatrixStore) => {
       });
     };
 
-    // 为每个片段独立生成字幕 PNG（如果有内容）
-    const segTextFilenames: (string | null)[] = [];
+    // 为每一个全局字幕（TextElement）生成一张 PNG（包含多行/单行），然后进行全局 overlay
+    const validTexts = settings.texts.filter(t => t.text.trim());
+    const textFilenames: string[] = [];
 
-    for (let si = 0; si < timeline.length; si++) {
-      const seg = timeline[si];
-      let textEntries: { text: string; style: TextStyle; pos: { x: number; y: number } }[] = [];
-
-      if (seg.segmentTexts && seg.segmentTexts.some((t: string) => t.trim())) {
-        // 使用此片段独立字幕，样式公用全局第一服文字设置，没有则用默认
-        const baseStyle: TextStyle = settings.texts.length > 0 ? settings.texts[0].style : defaultTextStyle;
-        const basePos = settings.texts.length > 0 ? settings.texts[0].pos : { x: 0, y: 0 };
-        textEntries = seg.segmentTexts
-          .filter((t: string) => t.trim())
-          .map((t: string) => ({ text: t, style: baseStyle, pos: basePos }));
-      } else if (settings.texts && settings.texts.some(t => t.text.trim())) {
-        // 全局字幕兼容
-        textEntries = settings.texts.filter(t => t.text.trim()).map(t => ({
-          text: t.text, style: t.style, pos: t.pos
-        }));
-      }
-
-      if (textEntries.length > 0) {
-        const pngBytes = await renderTextToPng(textEntries);
+    if (validTexts.length > 0) {
+      for (let i = 0; i < validTexts.length; i++) {
+        const textElem = validTexts[i];
+        // 用该字幕的样式（只包含本身），但由于 renderTextToPng 支持批量，这里传单元素数组
+        const pngBytes = await renderTextToPng([{
+          text: textElem.text,
+          style: textElem.style,
+          pos: textElem.pos
+        }]);
         if (pngBytes.length > 0) {
-          const fname = `seg_text_${si}.png`;
+          const fname = `global_text_${i}.png`;
           await ff.writeFile(fname, pngBytes);
-          segTextFilenames.push(fname);
-        } else {
-          segTextFilenames.push(null);
+          textFilenames.push(fname);
         }
-      } else {
-        segTextFilenames.push(null);
       }
-    }
-
-    // 将每段字幕 PNG 作为 FFmpeg 输入加入（BGM 之后）
-    const validSegTextFiles = segTextFilenames.filter(f => f !== null) as string[];
-
-    // 计算各 segment 的开始和结束时间
-    const segTimings: { start: number; end: number }[] = [];
-    let segCursor = 0;
-    for (const seg of timeline) {
-      segTimings.push({ start: segCursor, end: segCursor + seg.duration });
-      segCursor += seg.duration;
     }
 
     // 构建 post-concat 文字叠加链
-    const segTextFfmpegBaseIdx = inputs.length + (hasBgm ? 1 : 0);
     let currentVideoNode = 'outv_concat';
-    let textNodeCounter = 0;
+    const textInputBaseIdx = inputs.length + (hasBgm ? 1 : 0);
 
-    for (let si = 0; si < timeline.length; si++) {
-      const fname = segTextFilenames[si];
-      if (!fname) continue;
-      const { start, end } = segTimings[si];
-      const segInputIdx = segTextFfmpegBaseIdx + textNodeCounter;
-      const nextNode = `outv_seg_txt_${si}`;
-      // NOTE: overlay enable 参数允许它只在指定时间窗口内显示
-      filterComplex += `[${currentVideoNode}][${segInputIdx}:v]overlay=0:0:enable='between(t,${start.toFixed(3)},${end.toFixed(3)})'[${nextNode}]; `;
-      currentVideoNode = nextNode;
-      textNodeCounter++;
+    if (textFilenames.length > 0) {
+      for (let i = 0; i < validTexts.length; i++) {
+        const textElem = validTexts[i];
+        const fname = textFilenames[i];
+        if (!fname) continue;
+
+        // 计算该字幕的出现时间窗口
+        const txtStart = textElem.startTime ?? 0;
+        const txtDur = (textElem.duration && textElem.duration > 0) ? textElem.duration : totalExportDuration;
+        const txtEnd = txtStart + txtDur;
+
+        const segInputIdx = textInputBaseIdx + i;
+        const nextNode = `outv_seg_txt_${i}`;
+        const enableExpr = `enable='between(t,${txtStart.toFixed(3)},${txtEnd.toFixed(3)})'`;
+        
+        filterComplex += `[${currentVideoNode}][${segInputIdx}:v]overlay=0:0:${enableExpr}[${nextNode}]; `;
+        currentVideoNode = nextNode;
+      }
     }
 
-    // 如果没有任何字幕， currentVideoNode 仍是 outv_concat
+    // 无论有没有字幕，过渡节点设为 outv_texts
     filterComplex += `[${currentVideoNode}]copy[outv_texts]; `;
 
     // ── 图片贴纸叠加 ──
@@ -816,7 +788,7 @@ const runSingleFfmpegTask = async (taskId: string, store: MatrixStore) => {
         await ff.writeFile(imgName, await fetchFile(imgElem.file));
         imageFilenames.push(imgName);
 
-        const imgInputIdx = segTextFfmpegBaseIdx + validSegTextFiles.length + i;
+        const imgInputIdx = textInputBaseIdx + textFilenames.length + i;
         const nextOut = i === settings.images.length - 1 ? 'outv' : `outv_img_${i}`;
 
         // 算出实际显示时间窗口（duration=0 表示全段显示）
@@ -840,11 +812,10 @@ const runSingleFfmpegTask = async (taskId: string, store: MatrixStore) => {
       filterComplex += `[outa_raw]acopy[outa]`;
     }
 
-    // 组装 -i 参数
     const ffmpegArgs: string[] = [];
     inputs.forEach(i => { ffmpegArgs.push('-i', i.filename); });
     if (hasBgm) ffmpegArgs.push('-i', bgmFilename);
-    validSegTextFiles.forEach((fn: string) => { ffmpegArgs.push('-i', fn); });
+    textFilenames.forEach(fn => { ffmpegArgs.push('-i', fn); });
     imageFilenames.forEach(img => { ffmpegArgs.push('-i', img); });
 
     if (settings.antiDupConfig?.enabled) {
@@ -873,7 +844,7 @@ const runSingleFfmpegTask = async (taskId: string, store: MatrixStore) => {
     for (const input of inputs) { await ff.deleteFile(input.filename); }
     if (hasBgm && bgmFilename) { await ff.deleteFile(bgmFilename); }
     if (titleOverlayFilename) { try { await ff.deleteFile(titleOverlayFilename); } catch (_) { } }
-    for (const fn of validSegTextFiles) { try { await ff.deleteFile(fn); } catch (_) { } }
+    for (const fn of textFilenames) { try { await ff.deleteFile(fn); } catch (_) { } }
     for (const imgName of imageFilenames) { try { await ff.deleteFile(imgName); } catch (_) { } }
 
     updateExportTask(taskId, {
@@ -1390,7 +1361,6 @@ const NleVideoBlock = ({
   updateTimelineSegment, removeTimelineSegment, duplicateTimelineSegment
 }: any) => {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: seg.id });
-  const [editTab, setEditTab] = React.useState<'basic' | 'subtitle'>('basic');
 
   const [rect, setRect] = React.useState<DOMRect | null>(null);
   const blockRef = React.useRef<HTMLDivElement>(null);
@@ -1492,65 +1462,35 @@ const NleVideoBlock = ({
             transform: 'translate(-50%, -100%)'
           }}
         >
-          <div className="flex gap-1 border-b border-white/10 pb-1 mb-1">
-            <button onClick={() => setEditTab('basic')} className={`text-[10px] px-2 py-0.5 rounded ${editTab === 'basic' ? 'bg-orange-500/30 text-orange-300' : 'text-white/50 hover:text-white/80'}`}>基础</button>
-            <button onClick={() => setEditTab('subtitle')} className={`text-[10px] px-2 py-0.5 rounded ${editTab === 'subtitle' ? 'bg-orange-500/30 text-orange-300' : 'text-white/50 hover:text-white/80'}`}>独立字幕</button>
-          </div>
-          {editTab === 'basic' ? (
-            <>
-              <select
-                value={seg.poolId}
-                onChange={e => {
-                  const newPoolId = e.target.value;
-                  const targetPool = pools.find((p: any) => p.id === newPoolId);
-                  let newDuration = seg.duration;
-                  if (targetPool && targetPool.files.length > 0) {
-                    const validDurations = targetPool.files.map((f: any) => f.duration).filter((d: number) => d > 0);
-                    if (validDurations.length > 0) newDuration = Math.min(...validDurations);
-                  }
-                  updateTimelineSegment(seg.id, { poolId: newPoolId, duration: newDuration });
-                }}
-                className="bg-black/50 text-white/90 text-xs p-1 rounded border border-white/10 outline-none w-full"
-              >
-                {pools.map((p: any) => <option key={p.id} value={p.id}>{p.name}</option>)}
-              </select>
-              <div className="flex items-center gap-1">
-                <span className="text-white/50 text-[10px]">时长</span>
-                <input
-                  type="number" step="0.1" min="0.1" value={seg.duration}
-                  onChange={e => updateTimelineSegment(seg.id, { duration: parseFloat(e.target.value) || 0.1 })}
-                  className="bg-black/50 text-white/90 text-xs p-1 rounded border border-white/10 w-16 text-center outline-none"
-                />
-                <span className="text-white/50 text-[10px]">s</span>
-                <div className="flex-1 flex justify-end gap-1">
-                  <button onClick={() => { duplicateTimelineSegment(seg.id); setEditingSegId(null); }} className="text-white/60 hover:text-white hover:bg-white/10 p-1 rounded transition" title="复制片段"><Copy className="w-3 h-3" /></button>
-                  <button onClick={() => removeTimelineSegment(seg.id)} className="text-red-400 hover:bg-white/10 p-1 rounded transition" title="删除片段"><Trash2 className="w-3 h-3" /></button>
-                </div>
-              </div>
-            </>
-          ) : (
-            <div className="flex flex-col gap-1.5">
-              <span className="text-[10px] text-white/40">此段独立字幕（优先于全局字幕）</span>
-              {(seg.segmentTexts || ['']).map((txt: string, ti: number) => (
-                <div key={ti} className="flex gap-1 items-start">
-                  <textarea
-                    value={txt} rows={2} placeholder={`字幕行 ${ti + 1}`}
-                    onChange={e => {
-                      const newTexts = [...(seg.segmentTexts || [''])];
-                      newTexts[ti] = e.target.value;
-                      updateTimelineSegment(seg.id, { segmentTexts: newTexts });
-                    }}
-                    className="flex-1 bg-black/50 text-white/90 text-xs p-1 rounded border border-white/10 outline-none resize-none"
-                  />
-                  <button onClick={() => { const newTexts = (seg.segmentTexts || ['']).filter((_: string, i: number) => i !== ti); updateTimelineSegment(seg.id, { segmentTexts: newTexts.length ? newTexts : [''] }); }} className="text-red-400/60 hover:text-red-400 mt-0.5"><Trash2 className="w-3 h-3" /></button>
-                </div>
-              ))}
-              <button onClick={() => updateTimelineSegment(seg.id, { segmentTexts: [...(seg.segmentTexts || ['']), ''] })} className="text-[10px] text-white/50 hover:text-orange-400 border border-dashed border-white/10 rounded py-0.5 hover:border-orange-400/40 transition">+ 新增字幕行</button>
-              {seg.segmentTexts && seg.segmentTexts.some((t: string) => t.trim()) && (
-                <button onClick={() => updateTimelineSegment(seg.id, { segmentTexts: [] })} className="text-[10px] text-red-400/60 hover:text-red-400 border border-dashed border-red-400/20 rounded py-0.5 hover:border-red-400/40 transition">清除全部（恢复全局字幕）</button>
-              )}
+          <select
+            value={seg.poolId}
+            onChange={e => {
+              const newPoolId = e.target.value;
+              const targetPool = pools.find((p: any) => p.id === newPoolId);
+              let newDuration = seg.duration;
+              if (targetPool && targetPool.files.length > 0) {
+                const validDurations = targetPool.files.map((f: any) => f.duration).filter((d: number) => d > 0);
+                if (validDurations.length > 0) newDuration = Math.min(...validDurations);
+              }
+              updateTimelineSegment(seg.id, { poolId: newPoolId, duration: newDuration });
+            }}
+            className="bg-black/50 text-white/90 text-xs p-1 rounded border border-white/10 outline-none w-full"
+          >
+            {pools.map((p: any) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+          <div className="flex items-center gap-1">
+            <span className="text-white/50 text-[10px]">时长</span>
+            <input
+              type="number" step="0.1" min="0.1" value={seg.duration}
+              onChange={e => updateTimelineSegment(seg.id, { duration: parseFloat(e.target.value) || 0.1 })}
+              className="bg-black/50 text-white/90 text-xs p-1 rounded border border-white/10 w-16 text-center outline-none"
+            />
+            <span className="text-white/50 text-[10px]">s</span>
+            <div className="flex-1 flex justify-end gap-1">
+              <button onClick={() => { duplicateTimelineSegment(seg.id); setEditingSegId(null); }} className="text-white/60 hover:text-white hover:bg-white/10 p-1 rounded transition" title="复制片段"><Copy className="w-3 h-3" /></button>
+              <button onClick={() => removeTimelineSegment(seg.id)} className="text-red-400 hover:bg-white/10 p-1 rounded transition" title="删除片段"><Trash2 className="w-3 h-3" /></button>
             </div>
-          )}
+          </div>
         </div>,
         document.body
       )}
