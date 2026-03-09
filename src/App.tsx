@@ -25,10 +25,13 @@ import { create } from 'zustand';
 import { v4 as uuidv4 } from 'uuid';
 
 import { FFmpeg } from '@ffmpeg/ffmpeg';
-import { fetchFile, toBlobURL } from '@ffmpeg/util';
+import { fetchFile } from '@ffmpeg/util';
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
 import { set as idbSet, get as idbGet, del as idbDel } from 'idb-keyval';
+
+import coreURL from '@ffmpeg/core?url';
+import wasmURL from '@ffmpeg/core/wasm?url';
 
 // ==========================================
 // Types & Store
@@ -380,13 +383,10 @@ const getFFmpeg = async () => {
   try {
     ffmpeg = new FFmpeg();
 
-    // Use a CDN to load the FFmpeg core to prevent the 30MB wasm file from 
-    // being bundled into the app (which causes Vercel/Cloudflare Pages deployment to fail 
-    // due to > 25MB individual asset limits).
-    const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
+    // 使用本地 vite?url 引用和取消预构建，彻底实现秒速加载和防注入
     await ffmpeg.load({
-      coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
-      wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+      coreURL,
+      wasmURL,
     });
 
     store.setFfmpegStatus('ready');
@@ -600,11 +600,7 @@ const runSingleFfmpegTask = async (taskId: string, store: MatrixStore) => {
   const ff = new FFmpeg();
 
   try {
-    const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
-    await ff.load({
-      coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
-      wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
-    });
+    await ff.load({ coreURL, wasmURL });
 
     // 监听独立实例的 progress //
     ff.on('log', ({ message }) => {
@@ -726,6 +722,9 @@ const runSingleFfmpegTask = async (taskId: string, store: MatrixStore) => {
       cvs.width = OW; cvs.height = OH;
       const ctx = cvs.getContext('2d')!;
       ctx.clearRect(0, 0, OW, OH);
+      // 确保在绘制前，所有由 FontFace API 加载的自定义字体都已经准备就绪
+      await document.fonts.ready;
+
       entries.forEach(({ text, style, pos }) => {
         if (!text.trim()) return;
         ctx.save();
@@ -736,7 +735,15 @@ const runSingleFfmpegTask = async (taskId: string, store: MatrixStore) => {
         ctx.shadowBlur = style.shadowBlur * scaleM;
         ctx.shadowOffsetX = style.shadowDistance * Math.cos(style.shadowAngle * Math.PI / 180) * scaleM;
         ctx.shadowOffsetY = style.shadowDistance * -Math.sin(style.shadowAngle * Math.PI / 180) * scaleM;
-        ctx.font = `bold ${Math.round(style.fontSize * scaleM)}px "${style.fontFamily}"`;
+        
+        // 修复：如果 fontFamily 是连串带逗号的（如默认的 'SimHei, Heiti SC, sans-serif'），不要再套引号
+        // 只有单一定义的并且没有包裹引号的自定义字体时，才套引号
+        let safeFontFamily = style.fontFamily;
+        if (!safeFontFamily.includes(',') && !safeFontFamily.startsWith('"') && !safeFontFamily.startsWith("'")) {
+          safeFontFamily = `"${safeFontFamily}"`;
+        }
+        
+        ctx.font = `bold ${Math.round(style.fontSize * scaleM)}px ${safeFontFamily}`;
         ctx.fillStyle = style.color;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
