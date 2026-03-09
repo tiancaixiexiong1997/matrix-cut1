@@ -738,8 +738,11 @@ const runSingleFfmpegTask = async (taskId: string, store: MatrixStore) => {
         
         // 修复：如果 fontFamily 是连串带逗号的（如默认的 'SimHei, Heiti SC, sans-serif'），不要再套引号
         // 只有单一定义的并且没有包裹引号的自定义字体时，才套引号
+        // 注意：CSS 通用字体族（serif, sans-serif, monospace, cursive, fantasy）绝不能加引号
         let safeFontFamily = style.fontFamily;
-        if (!safeFontFamily.includes(',') && !safeFontFamily.startsWith('"') && !safeFontFamily.startsWith("'")) {
+        const genericFonts = ['serif', 'sans-serif', 'monospace', 'cursive', 'fantasy'];
+        
+        if (!safeFontFamily.includes(',') && !safeFontFamily.startsWith('"') && !safeFontFamily.startsWith("'") && !genericFonts.includes(safeFontFamily)) {
           safeFontFamily = `"${safeFontFamily}"`;
         }
         
